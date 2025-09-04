@@ -13,14 +13,13 @@
 
 #include "Extension/Frame.h"
 #include "Extension/Track.h"
+#include "Rtsp/Rtsp.h"
 
 namespace mediakit {
 
 /**
  * Opus帧音频通道
  * Opus frame audio channel
- 
- * [AUTO-TRANSLATED:522e95da]
  */
 class OpusTrack : public AudioTrackImp{
 public:
@@ -28,12 +27,12 @@ public:
     OpusTrack() : AudioTrackImp(CodecOpus,48000,2,16){}
 
 private:
-    // 克隆该Track  [AUTO-TRANSLATED:9a15682a]
+    // 克隆该Track
     // Clone this Track
     Track::Ptr clone() const override {
         return std::make_shared<OpusTrack>(*this);
     }
-    // 生成sdp  [AUTO-TRANSLATED:663a9367]
+    // 生成sdp
     // Generate sdp
     Sdp::Ptr getSdp(uint8_t payload_type) const override ;
 };

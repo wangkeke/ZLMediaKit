@@ -1,6 +1,10 @@
 ﻿#include "RtspMediaSourceImp.h"
 #include "RtspDemuxer.h"
 #include "Common/config.h"
+#ifdef ENABLE_FFMPEG
+#include "Codec/AudioTrackMuxer.h"
+#endif
+
 namespace mediakit {
 void RtspMediaSource::setSdp(const std::string &sdp) {
     SdpParser sdp_parser(sdp);
@@ -138,6 +142,19 @@ void RtspMediaSourceImp::setProtocolOption(const ProtocolOption &option)
     for (auto &track : _demuxer->getTracks(false)) {
         _muxer->addTrack(track);
         track->addDelegate(_muxer);
+        
+#ifdef ENABLE_FFMPEG
+        // 如果是AAC音频轨道，则创建Opus转码轨道
+        auto audio_track = std::dynamic_pointer_cast<AudioTrack>(track);
+        if (audio_track && audio_track->getCodecId() == CodecAAC) {
+            // 创建AAC到Opus的转码轨道
+            auto transcoded_track = std::make_shared<AudioTrackMuxer>(audio_track);
+            // 将转码后的Opus轨道也加入到Muxer中
+            _muxer->addTrack(transcoded_track);
+            // 让原始AAC轨道的数据流向转码轨道
+            audio_track->addDelegate(transcoded_track);
+        }
+#endif
     }
 }
 
@@ -151,4 +168,3 @@ RtspMediaSource::Ptr RtspMediaSourceImp::clone(const std::string &stream) {
 }
 
 }
-
