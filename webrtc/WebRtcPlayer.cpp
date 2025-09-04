@@ -283,10 +283,53 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
         return;
     }
     WebRtcTransportImp::onRtcConfigure(configure);
-    // 这是播放  [AUTO-TRANSLATED:d93c019e]
-    // This is playing
-    configure.audio.direction = configure.video.direction = RtpDirection::sendonly;
-    configure.setPlayRtspInfo(playSrc->getSdp());
+    
+    // 这是播放场景，所有轨道都应该是 sendonly
+    configure.audio.direction = RtpDirection::sendonly;
+    configure.video.direction = RtpDirection::sendonly;
+
+    // --- START OF FINAL MODIFICATION ---
+
+    // 直接从 MediaSource 获取当前所有可用的、就绪的轨道
+    // getTracks(true) 返回的轨道列表，包含了我们动态添加的 AudioTrackMuxer
+    auto tracks = play_src->getTracks(true);
+
+    bool has_audio = false;
+    bool has_video = false;
+
+    // 遍历所有可用轨道，手动构建 RtcConfigure
+    for (const auto &track : tracks) {
+        if (track->getTrackType() == TrackAudio) {
+            // 找到了音频轨道
+            has_audio = true;
+            if (track->getCodecId() == CodecOpus) {
+                // 【优先选择Opus】如果找到了Opus轨道，就清空偏好列表，只告诉它用Opus
+                configure.audio.preferred_codec.clear();
+                configure.audio.preferred_codec.emplace_back(CodecOpus);
+            } else if (configure.audio.preferred_codec.empty()) {
+                // 如果没有找到Opus，但有其他音频（如PCMA），也配置它
+                configure.audio.preferred_codec.emplace_back(track->getCodecId());
+            }
+        } else if (track->getTrackType() == TrackVideo) {
+            // 找到了视频轨道
+            has_video = true;
+            configure.video.preferred_codec.clear();
+            configure.video.preferred_codec.emplace_back(track->getCodecId());
+        }
+    }
+
+    // 如果遍历后发现根本没有音频或视频轨道，则将其设置为 inactive
+    if (!has_audio) {
+        configure.audio.direction = RtpDirection::inactive;
+    }
+    if (!has_video) {
+        configure.video.direction = RtpDirection::inactive;
+    }
+
+    // 【关键】不再调用 configure.setPlayRtspInfo()，因为它只会读取旧的静态SDP。
+    // 我们已经通过直接设置 preferred_codec 来完成了轨道选择。
+    
+    // --- END OF FINAL MODIFICATION ---
 }
 
 void WebRtcPlayer::sendConfigFrames(uint32_t before_seq, uint32_t sample_rate, uint32_t timestamp, uint64_t ntp_timestamp) {
