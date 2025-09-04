@@ -1,67 +1,48 @@
 #include "AudioTrackMuxer.h"
-#include "Rtsp/Rtsp.h"
-
-// 不直接包含Opus.h，而是直接声明我们需要的函数
-namespace mediakit {
-    Sdp::Ptr getSdpFromOpusTrack(uint8_t payload_type, int sample_rate, int channels);
-}
+// 不再需要包含 Opus.h 或 Factory.h
+#include "Codec/Transcode.h" // 只需要包含这个
 
 namespace mediakit {
 
 AudioTrackMuxer::AudioTrackMuxer(const AudioTrack::Ptr &origin_track) :
-AudioTrack(), // 调用基类构造函数
-_origin_track(origin_track)
+    AudioTrackImp(CodecOpus, 48000, origin_track->getAudioChannel(), 16),
+    _origin_track(origin_track)
 {
 #ifdef ENABLE_FFMPEG
-_transcode = std::make_shared<Transcode>();
-// 直接使用Transcode的open(Track, CodecId, ...)重载，更简洁
-if (!_transcode->open(origin_track, CodecOpus, 48000, origin_track->getAudioChannel())) {
-WarnL << "Failed to open AAC to Opus transcoder";
-_transcode = nullptr;
-}
+    // 创建并打开我们新的Transcode类
+    _transcode = std::make_shared<Transcode>();
+    if (_transcode->open(origin_track, CodecOpus, 48000, getAudioChannel())) {
+        // 【修正1, 2, 3】: 将转码结果通过回调送入本轨道
+        _transcode->setOnFrame([this](const Frame::Ptr &opus_frame){
+            if (opus_frame) {
+                AudioTrack::inputFrame(opus_frame);
+            }
+        });
+    }else {
+        WarnL << "Failed to open AAC to Opus transcoder via Transcode class";
+        _transcode = nullptr;
+    }
 #endif
 }
 
-// 这个方法由原始AAC轨道的 `addDelegate` 机制自动调用
 bool AudioTrackMuxer::inputFrame(const Frame::Ptr &frame) {
 #ifdef ENABLE_FFMPEG
-if (_transcode) {
-// 1. 输入AAC帧进行转码，得到Opus帧
-auto opus_frame = _transcode->inputFrame(frame);
-if (opus_frame) {
-// 2. 【关键】调用基类的inputFrame，将Opus帧分发给自己的RtpEncoder
-// RtpEncoder会自动打包成RTP，并放入RingBuffer
-AudioTrack::inputFrame(opus_frame);
-}
-}
+    if (_transcode) {
+        // 【修正1, 2, 3】: inputFrame不返回值，结果通过回调处理
+        _transcode->inputFrame(frame);
+    }
 #endif
-return true; // 总是返回true，表示我们处理了这一帧
+    return true;
 }
 
-// 以下函数用于对外声明自己是Opus轨道
-CodecId AudioTrackMuxer::getCodecId() const {
-return CodecOpus;
-}
-
-int AudioTrackMuxer::getAudioSampleRate() const {
-return 48000;
-}
-
-int AudioTrackMuxer::getAudioChannel() const {
-return _origin_track->getAudioChannel();
-}
-
-int AudioTrackMuxer::getAudioSampleBit() const {
-return 16;
-}
-
-bool AudioTrackMuxer::ready() const {
-return true;
-}
-
-Sdp::Ptr AudioTrackMuxer::getSdp(uint8_t payload_type) const {
-// 使用DefaultSdp类来生成SDP
-return std::make_shared<DefaultSdp>(payload_type, *this);
+Track::Ptr AudioTrackMuxer::clone() const {
+    // 【修正1】: 使用 std::dynamic_pointer_cast 进行安全的类型转换
+    auto cloned_origin = std::dynamic_pointer_cast<AudioTrack>(_origin_track->clone());
+    if (cloned_origin) {
+        return std::make_shared<AudioTrackMuxer>(cloned_origin);
+    }
+    // 如果克隆失败，返回nullptr或抛出异常
+    return nullptr;
 }
 
 } // namespace mediakit

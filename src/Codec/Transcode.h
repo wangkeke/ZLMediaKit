@@ -1,20 +1,11 @@
-﻿/*
- * Copyright (c) 2016-present The ZLMediaKit project authors. All Rights Reserved.
- *
- * This file is part of ZLMediaKit(https://github.com/ZLMediaKit/ZLMediaKit).
- *
- * Use of this source code is governed by MIT-like license that can be found in the
- * LICENSE file in the root of the source tree. All contributing project authors
- * may be found in the AUTHORS file in the root of the source tree.
- */
-
-#ifndef ZLMEDIAKIT_TRANSCODE_H
+﻿#ifndef ZLMEDIAKIT_TRANSCODE_H
 #define ZLMEDIAKIT_TRANSCODE_H
 
 #if defined(ENABLE_FFMPEG)
 
 #include "Util/TimeTicker.h"
 #include "Common/MediaSink.h"
+#include "Extension/Track.h" // 包含Frame.h
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +25,51 @@ extern "C" {
 #define FF_CODEC_VER_7_1 AV_VERSION_INT(61, 0, 0)
 
 namespace mediakit {
+
+class FFmpegFrame;
+class FFmpegSwr;
+class FFmpegDecoder;
+
+/**
+ * 一个高级的转码门面类.
+ * 封装了从一种编码格式的Frame到另一种编码格式的Frame的完整转换过程.
+ * 例如: aac_frame -> [decoder -> swr -> encoder] -> opus_frame
+ */
+class Transcode : public std::enable_shared_from_this<Transcode> {
+public:
+    using Ptr = std::shared_ptr<Transcode>;
+    using on_transcoded_frame = std::function<void(const Frame::Ptr &)>;
+
+    Transcode();
+    ~Transcode();
+
+    /**
+     * 打开转码器
+     * @param src_track 源轨道，用于获取解码器和音频参数
+     * @param dst_codec 目标编码ID
+     * @param dst_samplerate 目标采样率
+     * @param dst_channels 目标通道数
+     * @return 是否成功
+     */
+    bool open(const Track::Ptr &src_track, CodecId dst_codec, int dst_samplerate = 0, int dst_channels = 0);
+
+    /**
+     * 输入一个Frame进行转码.
+     * 转码后的Frame会通过setOnFrame回调异步返回.
+     * @param frame 原始编码的帧 (例如 AAC Frame)
+     */
+    void inputFrame(const Frame::Ptr &frame);
+    
+    /**
+     * 设置转码成功后的Frame输出回调
+     */
+    void setOnFrame(on_transcoded_frame cb);
+
+private:
+    // 使用PIMPL模式隐藏所有FFmpeg的复杂实现细节
+    class Imp; 
+    std::unique_ptr<Imp> _imp;
+};
 
 class FFmpegFrame {
 public:

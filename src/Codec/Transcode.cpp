@@ -16,11 +16,34 @@
 #include "Util/uv_errno.h"
 #include "Transcode.h"
 #include "Common/config.h"
+#include <deque>
 
 #define MAX_DELAY_SECOND 3
 
 using namespace std;
 using namespace toolkit;
+
+// 【修正5】: 添加必要的辅助函数
+namespace mediakit {
+// 将 ZLMediaKit::CodecId 转换为 FFmpeg 的 AVCodecID
+static AVCodecID get_avcodec_id(CodecId codec) {
+    switch (codec) {
+        case CodecAAC: return AV_CODEC_ID_AAC;
+        case CodecOpus: return AV_CODEC_ID_OPUS;
+        // ...可以添加更多...
+        default: return AV_CODEC_ID_NONE;
+    }
+}
+// 将 FFmpeg 的 AVCodecID 转换为 ZLMediaKit::CodecId
+static CodecId get_codec_id(AVCodecID av_codec) {
+    switch (av_codec) {
+        case AV_CODEC_ID_AAC: return CodecAAC;
+        case AV_CODEC_ID_OPUS: return CodecOpus;
+        // ...可以添加更多...
+        default: return CodecInvalid;
+    }
+}
+} // namespace mediakit
 
 namespace mediakit {
 
@@ -805,6 +828,128 @@ std::tuple<bool, std::string> FFmpegUtils::saveFrame(const FFmpegFrame::Ptr &fra
     DebugL << "Screenshot successful: " << filename;
     return make_tuple<bool, std::string>(true, "");
 }
+
+// --- START OF NEW Transcode IMPLEMENTATION ---
+
+// PIMPL模式：将所有FFmpeg的复杂性隐藏在这个内部类中
+class Transcode::Imp {
+public:
+    FFmpegDecoder::Ptr _decoder;
+    FFmpegSwr::Ptr _swr;
+    std::shared_ptr<AVCodecContext> _encoder_ctx;
+    on_transcoded_frame _on_frame;
+
+    ~Imp() = default;
+    
+    void encode_frame(AVFrame *frame_in, uint64_t dts, uint64_t pts) {
+        if (!_encoder_ctx) return;
+        
+        AVFrame *frame_to_send = frame_in; // <-- 重新声明并初始化
+
+        if (frame_to_send) {
+             // 必须设置pts，否则B帧场景会出问题
+            frame_to_send->pts = av_rescale_q(pts, {1, 1000}, _encoder_ctx->time_base);
+        }
+
+        if (avcodec_send_frame(_encoder_ctx.get(), frame_to_send) == 0) {
+            while (true) {
+                auto pkt = alloc_av_packet();
+                int ret = avcodec_receive_packet(_encoder_ctx.get(), pkt.get());
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                    break;
+                }
+                if (ret < 0) {
+                    WarnL << "FFmpeg encoding failed: " << ffmpeg_err(ret);
+                    break;
+                }
+                
+                auto out_dts = av_rescale_q(pkt->dts, _encoder_ctx->time_base, {1, 1000});
+                auto out_pts = av_rescale_q(pkt->pts, _encoder_ctx->time_base, {1, 1000});
+
+                auto frame = std::make_shared<FrameFromPtr>(get_codec_id(_encoder_ctx->codec_id), (char*)pkt->data, pkt->size, out_dts, out_pts);
+                if (_on_frame) {
+                    _on_frame(frame);
+                }
+            }
+        }
+    }
+};
+
+Transcode::Transcode() : _imp(new Imp()) {}
+
+Transcode::~Transcode() = default;
+
+bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_samplerate, int dst_channels) {
+    auto audio_track = std::dynamic_pointer_cast<AudioTrack>(src_track);
+    if (!audio_track) {
+        WarnL << "Transcode::open failed: source track is not an audio track.";
+        return false;
+    }
+
+    // 1. 创建解码器
+    _imp->_decoder = std::make_shared<FFmpegDecoder>(src_track);
+
+    // 2. 创建重采样器
+    dst_samplerate = dst_samplerate > 0 ? dst_samplerate : audio_track->getAudioSampleRate();
+    dst_channels = dst_channels > 0 ? dst_channels : audio_track->getAudioChannel();
+
+#if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
+    AVChannelLayout ch_layout;
+    av_channel_layout_default(&ch_layout, dst_channels);
+    _imp->_swr = std::make_shared<FFmpegSwr>(AV_SAMPLE_FMT_S16, &ch_layout, dst_samplerate);
+    av_channel_layout_uninit(&ch_layout);
+#else
+    _imp->_swr = std::make_shared<FFmpegSwr>(AV_SAMPLE_FMT_S16, dst_channels,
+                                       av_get_default_channel_layout(dst_channels), dst_samplerate);
+#endif
+
+    // 3. 创建编码器
+    const AVCodec *encoder = avcodec_find_encoder(get_avcodec_id(dst_codec));
+    if (!encoder) {
+        WarnL << "Encoder not found for codec " << getCodecName(dst_codec);
+        return false;
+    }
+    _imp->_encoder_ctx.reset(avcodec_alloc_context3(encoder), [](AVCodecContext *ctx) {
+        avcodec_free_context(&ctx);
+    });
+
+    _imp->_encoder_ctx->sample_fmt = AV_SAMPLE_FMT_S16;
+    _imp->_encoder_ctx->sample_rate = dst_samplerate;
+    _imp->_encoder_ctx->time_base = {1, dst_samplerate}; // 时间基
+#if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
+    av_channel_layout_default(&_imp->_encoder_ctx->ch_layout, dst_channels);
+#else
+    _imp->_encoder_ctx->channels = dst_channels;
+    _imp->_encoder_ctx->channel_layout = av_get_default_channel_layout(dst_channels);
+#endif
+
+    if (avcodec_open2(_imp->_encoder_ctx.get(), encoder, nullptr) < 0) {
+        WarnL << "Failed to open encoder for codec " << getCodecName(dst_codec);
+        return false;
+    }
+
+    // 4. 设置回调链
+    _imp->_decoder->setOnDecode([this](const FFmpegFrame::Ptr &pcm_frame) {
+        auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
+        if (resampled_frame) {
+            _imp->encode_frame(resampled_frame->get(), pcm_frame->get()->pkt_dts, pcm_frame->get()->pts);
+        }
+    });
+
+    return true;
+}
+
+void Transcode::inputFrame(const Frame::Ptr &frame) {
+    if (_imp->_decoder) {
+        _imp->_decoder->inputFrame(frame, false, false);
+    }
+}
+
+void Transcode::setOnFrame(on_transcoded_frame cb) {
+    _imp->_on_frame = std::move(cb);
+}
+
+// --- END OF NEW Transcode IMPLEMENTATION ---
 
 } // namespace mediakit
 #endif // ENABLE_FFMPEG
