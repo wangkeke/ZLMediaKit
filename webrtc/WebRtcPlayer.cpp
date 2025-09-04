@@ -292,29 +292,35 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
 
     // 直接从 MediaSource 获取当前所有可用的、就绪的轨道
     // getTracks(true) 返回的轨道列表，包含了我们动态添加的 AudioTrackMuxer
-    auto tracks = play_src->getTracks(true);
+    auto tracks = playSrc->getTracks(true);
 
     bool has_audio = false;
     bool has_video = false;
 
-    // 遍历所有可用轨道，手动构建 RtcConfigure
+        // 遍历所有可用轨道，手动构建 RtcConfigure
     for (const auto &track : tracks) {
         if (track->getTrackType() == TrackAudio) {
-            // 找到了音频轨道
             has_audio = true;
             if (track->getCodecId() == CodecOpus) {
-                // 【优先选择Opus】如果找到了Opus轨道，就清空偏好列表，只告诉它用Opus
+                // 【优先选择Opus】
                 configure.audio.preferred_codec.clear();
                 configure.audio.preferred_codec.emplace_back(CodecOpus);
-            } else if (configure.audio.preferred_codec.empty()) {
-                // 如果没有找到Opus，但有其他音频（如PCMA），也配置它
-                configure.audio.preferred_codec.emplace_back(track->getCodecId());
+                // 找到最优的Opus后，就不再关心其他音频轨道了
+                break; 
             }
-        } else if (track->getTrackType() == TrackVideo) {
-            // 找到了视频轨道
+        }
+    }
+    
+    // 再次遍历以处理视频和备用音频（如果需要）
+    for (const auto &track : tracks) {
+        if (track->getTrackType() == TrackVideo) {
             has_video = true;
             configure.video.preferred_codec.clear();
             configure.video.preferred_codec.emplace_back(track->getCodecId());
+        } else if (track->getTrackType() == TrackAudio && configure.audio.preferred_codec.empty()) {
+            // 如果上面没有找到Opus，这里可以配置一个备用的音频编码
+            has_audio = true;
+            configure.audio.preferred_codec.emplace_back(track->getCodecId());
         }
     }
 
