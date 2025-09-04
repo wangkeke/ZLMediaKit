@@ -519,227 +519,6 @@ void SdpAttrSetup::parse(const string &str) {
     CHECK_SDP(role != DtlsRole::invalid);
 }
 
-void RtcConfigure::getMediaPayload(const RtcMedia &media, RtcCodecPlan &plan, uint32_t &ssrc) const {
-    // 获取ssrc  [AUTO-TRANSLATED:16555405]
-    // Get ssrc
-    ssrc = media.ssrc;
-
-    // 获取编码方案  [AUTO-TRANSLATED:081303f3]
-    // Get encoding scheme
-    bool check_profile = true;
-    bool check_codec = true;
-
-RETRY:
-    // 查找候选的编码方案  [AUTO-TRANSLATED:9259708a]
-    // Find candidate encoding schemes
-    vector<const RtcCodecPlan *> candidate;
-    for (auto &item : media.plan) {
-        auto codec = getCodecId(item.codec);
-        if (codec == CodecInvalid) {
-            // 不支持的编码方案  [AUTO-TRANSLATED:46578d01]
-            // Unsupported encoding scheme
-            continue;
-        }
-        if (check_codec) {
-            // 检查编码方案是否为候选者  [AUTO-TRANSLATED:06202360]
-            // Check if the encoding scheme is a candidate
-            auto it = find(media.preferred_codec.begin(), media.preferred_codec.end(), codec);
-            if (it == media.preferred_codec.end()) {
-                // 不是候选者  [AUTO-TRANSLATED:64183515]
-                // Not a candidate
-                continue;
-            }
-        }
-        if (check_profile && !onCheckCodecProfile(item, codec)) {
-            // profile 不匹配  [AUTO-TRANSLATED:896071d4]
-            // Profile does not match
-            continue;
-        }
-        candidate.emplace_back(&item);
-    }
-
-    if (candidate.empty()) {
-        if (check_profile) {
-            // 如果是由于检查profile导致匹配失败，那么重试一次，且不检查profile  [AUTO-TRANSLATED:897fa4ae]
-            // If the matching fails due to profile check, retry once without checking profile
-            check_profile = false;
-            goto RETRY;
-        }
-
-        if (check_codec) {
-            // 如果是由于检查codec导致匹配失败，那么重试一次，且不检查codec  [AUTO-TRANSLATED:fbd85968]
-            // If the matching fails due to codec check, retry once without checking codec
-            check_codec = false;
-            goto RETRY;
-        }
-        // 未找到合适的编码方案  [AUTO-TRANSLATED:174262d6]
-        // Suitable encoding scheme not found
-        throw std::invalid_argument("not found suitable codec plan");
-    }
-
-    // 优先选择匹配度最高的方案  [AUTO-TRANSLATED:21197341]
-    // Prefer the encoding scheme with the highest match
-    sort(candidate.begin(), candidate.end(), [](const RtcCodecPlan *a, const RtcCodecPlan *b) {
-        // 假设第一优先级的是h264  [AUTO-TRANSLATED:7e3577d4]
-        // Assume the first priority is h264
-        auto codec_a = getCodecId(a->codec);
-        auto codec_b = getCodecId(b->codec);
-        if (codec_a == codec_b) {
-            // 比较采样率  [AUTO-TRANSLATED:88e412e7]
-            // Compare sampling rates
-            return a->sample_rate > b->sample_rate;
-        }
-        return codec_a < codec_b;
-    });
-
-    plan = *candidate[0];
-    onSelectPlan(plan, getCodecId(plan.codec));
-}
-
-void RtcConfigure::createAnswer(const RtcSession &offer, RtcSession &answer) const {
-    answer.media.clear();
-    answer.media.reserve(offer.media.size());
-
-    for (auto &offer_media : offer.media) {
-        RtcMedia answer_media;
-        answer_media.type = offer_media.type;
-        answer_media.mid = offer_media.mid;
-        answer_media.proto = offer_media.proto;
-        answer_media.ice_ufrag = ice_username;
-        answer_media.ice_pwd = ice_password;
-        answer_media.fingerprint = fingerprint;
-        answer_media.ice_lite = true;
-        answer_media.ice_options = "trickle";
-        answer_media.rtcp_mux = offer_media.rtcp_mux && offer_media.rtp_rtcp_mux;
-        answer_media.rtp_rtcp_mux = offer_media.rtp_rtcp_mux;
-
-        // 拷贝dtls属性  [AUTO-TRANSLATED:88503224]
-        // Copy dtls attributes
-        answer_media.role = offer_media.role;
-        if (offer_media.ice_trickle) {
-            answer_media.ice_trickle = true;
-        }
-
-        // 拷贝扩展  [AUTO-TRANSLATED:4671246f]
-        // Copy extensions
-        for (auto &ext : offer_media.extmap) {
-            auto it = offer_media.preferred_extmap.find(ext.first);
-            if (it != offer_media.preferred_extmap.end() && it->second != RtpDirection::inactive) {
-                answer_media.extmap.emplace(ext.first, ext.second);
-            }
-        }
-
-        try {
-            // ssrc  [AUTO-TRANSLATED:16555405]
-            // ssrc
-            uint32_t ssrc = 0;
-            // 编码方案  [AUTO-TRANSLATED:081303f3]
-            // Encoding scheme
-            RtcCodecPlan plan;
-            getMediaPayload(offer_media, plan, ssrc);
-
-            // 添加编码方案  [AUTO-TRANSLATED:4139037d]
-            // Add encoding scheme
-            answer_media.plan.emplace_back(plan);
-            answer_media.ssrc = ssrc;
-            answer_media.direction = getRtpDirectionInverse(offer_media.direction);
-            answer_media.caps = offer_media.caps;
-        } catch (std::exception &ex) {
-            // 未找到合适的编码方案  [AUTO-TRANSLATED:174262d6]
-            // Suitable encoding scheme not found
-            answer_media.direction = RtpDirection::inactive;
-        }
-
-        answer.media.emplace_back(answer_media);
-    }
-}
-
-void RtcConfigure::setPlayRtspInfo(const string &sdp) {
-    RtcSession session;
-    video.direction = RtpDirection::inactive;
-    audio.direction = RtpDirection::inactive;
-
-    session.loadFrom(sdp);
-    for (auto &m : session.media) {
-        switch (m.type) {
-            case TrackVideo: {
-                video.direction = RtpDirection::sendonly;
-                _rtsp_video_plan = std::make_shared<RtcCodecPlan>(m.plan[0]);
-                video.preferred_codec.clear();
-                video.preferred_codec.emplace_back(getCodecId(_rtsp_video_plan->codec));
-                break;
-            }
-            case TrackAudio: {
-                audio.direction = RtpDirection::sendonly;
-                _rtsp_audio_plan = std::make_shared<RtcCodecPlan>(m.plan[0]);
-                audio.preferred_codec.clear();
-                // 优先选择Opus编解码器
-                audio.preferred_codec.insert(audio.preferred_codec.begin(), CodecOpus);
-                break;
-            }
-            default: break;
-        }
-    }
-}
-
-static const string kH264Profile { "profile-level-id" };
-static const string kH265Profile { "profile-id" };
-static const string kMode { "packetization-mode" };
-
-bool RtcConfigure::onCheckCodecProfile(const RtcCodecPlan &plan, CodecId codec) const {
-    if (_rtsp_audio_plan && codec == getCodecId(_rtsp_audio_plan->codec)) {
-        if (plan.sample_rate != _rtsp_audio_plan->sample_rate || plan.channel != _rtsp_audio_plan->channel) {
-            // 音频采样率和通道数必须相同  [AUTO-TRANSLATED:6e591932]
-            // Audio sampling rate and number of channels must be the same
-            return false;
-        }
-        return true;
-    }
-    if (_rtsp_video_plan && codec == CodecH264 && getCodecId(_rtsp_video_plan->codec) == CodecH264) {
-        // h264时，profile-level-id  [AUTO-TRANSLATED:94a5f360]
-        // When h264, profile-level-id
-        if (strcasecmp(_rtsp_video_plan->fmtp[kH264Profile].data(), const_cast<RtcCodecPlan &>(plan).fmtp[kH264Profile].data())) {
-            // profile-level-id 不匹配  [AUTO-TRANSLATED:814ec4c4]
-            // profile-level-id does not match
-            return false;
-        }
-        return true;
-    }
-
-    if (_rtsp_video_plan && codec == CodecH265 && getCodecId(_rtsp_video_plan->codec) == CodecH265) {
-        // h265时，profile-id
-        if (strcasecmp(_rtsp_video_plan->fmtp[kH265Profile].data(), const_cast<RtcCodecPlan &>(plan).fmtp[kH265Profile].data())) {
-            // profile-id 不匹配
-            return false;
-        }
-        return true;
-    }
-
-    return true;
-}
-
-/**
- Single NAI Unit Mode = 0. // Single NAI mode (Only nals from 1-23 are allowed)
- Non Interleaved Mode = 1，// Non-interleaved Mode: 1-23，24 (STAP-A)，28 (FU-A) are allowed
- Interleaved Mode = 2,  // 25 (STAP-B)，26 (MTAP16)，27 (MTAP24)，28 (EU-A)，and 29 (EU-B) are allowed.
- Single NAI Unit Mode = 0. // Single NAI mode (Only nals from 1-23 are allowed)
- Non Interleaved Mode = 1，// Non-interleaved Mode: 1-23，24 (STAP-A)，28 (FU-A) are allowed
- Interleaved Mode = 2,  // 25 (STAP-B)，26 (MTAP16)，27 (MTAP24)，28 (EU-A)，and 29 (EU-B) are allowed.
- *
- * [AUTO-TRANSLATED:b1526114]
- **/
-void RtcConfigure::onSelectPlan(RtcCodecPlan &plan, CodecId codec) const {
-    if (_rtsp_video_plan && codec == CodecH264 && getCodecId(_rtsp_video_plan->codec) == CodecH264) {
-        // h264时，设置packetization-mod为一致  [AUTO-TRANSLATED:59a00889]
-        // When h264, set packetization-mod to be consistent
-        auto mode = _rtsp_video_plan->fmtp[kMode];
-        GET_CONFIG(bool, h264_stap_a, Rtp::kH264StapA);
-        plan.fmtp[kMode] = mode.empty() ? std::to_string(h264_stap_a) : mode;
-    }
-}
-
-} // namespace mediakit
-
 string SdpAttrSetup::toString() const {
     if (value.empty()) {
         value = getDtlsRoleString(role);
@@ -2071,14 +1850,34 @@ static const string kH265Profile { "profile-id" };
 static const string kMode { "packetization-mode" };
 
 bool RtcConfigure::onCheckCodecProfile(const RtcCodecPlan &plan, CodecId codec) const {
-    if (_rtsp_audio_plan && codec == getCodecId(_rtsp_audio_plan->codec)) {
-        if (plan.sample_rate != _rtsp_audio_plan->sample_rate || plan.channel != _rtsp_audio_plan->channel) {
-            // 音频采样率和通道数必须相同  [AUTO-TRANSLATED:6e591932]
-            // Audio sampling rate and number of channels must be the same
-            return false;
+    // --- START OF MODIFICATION ---
+
+    if (_rtsp_audio_plan) {
+        // 我们正在处理一个有固定音频源的RTSP播放场景
+        auto src_codec = getCodecId(_rtsp_audio_plan->codec);
+
+        // 特例：如果源是AAC，而浏览器提供了Opus，这正是我们期望的转码场景。
+        // 在这种情况下，我们不关心采样率或通道数是否匹配，因为FFmpeg会处理好。
+        // 我们直接认为这是一个完美的匹配，返回true。
+        if (src_codec == CodecAAC && codec == CodecOpus) {
+            return true;
         }
-        return true;
+
+        // 对于其他情况（例如源和目标都是PCMA），我们执行原始的严格检查。
+        if (codec == src_codec) {
+            if (plan.sample_rate != _rtsp_audio_plan->sample_rate || plan.channel != _rtsp_audio_plan->channel) {
+                // 音频采样率和通道数必须相同
+                WarnL << "Audio parameters mismatch for codec " << getCodecName(codec)
+                      << ": offer(" << plan.sample_rate << "/" << plan.channel
+                      << ") vs source(" << _rtsp_audio_plan->sample_rate << "/" << _rtsp_audio_plan->channel << ")";
+                return false;
+            }
+            return true;
+        }
     }
+
+    // --- END OF MODIFICATION ---
+
     if (_rtsp_video_plan && codec == CodecH264 && getCodecId(_rtsp_video_plan->codec) == CodecH264) {
         // h264时，profile-level-id  [AUTO-TRANSLATED:94a5f360]
         // When h264, profile-level-id
