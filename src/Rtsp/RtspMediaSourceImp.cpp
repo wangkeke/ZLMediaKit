@@ -139,6 +139,10 @@ void RtspMediaSourceImp::setProtocolOption(const ProtocolOption &option)
     // Let the _muxer object intercept some events (such as recording related events)
     MediaSource::setListener(_muxer);
 
+    // ==================== 日志探针 A.0 ====================
+    InfoL << ">>>>>>>>>> 探针 A.0: 开始运行AAC -> OPUS转码 ...";
+    // =======================================================
+
     for (auto &track : _demuxer->getTracks(false)) {
         _muxer->addTrack(track);
         track->addDelegate(_muxer);

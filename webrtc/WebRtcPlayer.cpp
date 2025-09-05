@@ -332,9 +332,6 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
         configure.video.direction = RtpDirection::inactive;
     }
 
-    // 【调试步骤1】: 强制禁用视频轨道
-    configure.video.direction = RtpDirection::inactive;
-
     // 【关键】不再调用 configure.setPlayRtspInfo()，因为它只会读取旧的静态SDP。
     // 我们已经通过直接设置 preferred_codec 来完成了轨道选择。
     
