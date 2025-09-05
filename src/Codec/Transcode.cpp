@@ -572,8 +572,14 @@ bool FFmpegDecoder::decodeFrame(const char *data, size_t size, uint64_t dts, uin
         pkt->flags |= AV_PKT_FLAG_KEY;
     }
 
+    // 【调试探针 1】: 确认数据包是否送达解码器
+    InfoL << "FFmpegDecoder::decodeFrame: Sending packet, size=" << size << ", pts=" << pts;
+
     auto ret = avcodec_send_packet(_context.get(), pkt.get());
     if (ret < 0) {
+        // 【调试探针 2】: 捕获发送失败的错误
+        WarnL << "avcodec_send_packet failed: " << ffmpeg_err(ret);
+
         if (ret != AVERROR_INVALIDDATA) {
             WarnL << "avcodec_send_packet failed:" << ffmpeg_err(ret);
         }
@@ -583,6 +589,12 @@ bool FFmpegDecoder::decodeFrame(const char *data, size_t size, uint64_t dts, uin
     for (;;) {
         auto out_frame = _frame_pool.obtain2();
         ret = avcodec_receive_frame(_context.get(), out_frame->get());
+        
+        // 【调试探针 3】: 确认解码器是否输出了帧
+        if (ret >= 0) {
+            InfoL << "FFmpegDecoder::decodeFrame: !!! SUCCESSFULLY RECEIVED A PCM FRAME !!!, samples=" << out_frame->get()->nb_samples;
+        }
+        
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
             break;
         }
