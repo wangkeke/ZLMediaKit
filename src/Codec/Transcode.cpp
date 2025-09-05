@@ -837,6 +837,9 @@ public:
     FFmpegSwr::Ptr _swr;
     std::shared_ptr<AVCodecContext> _encoder_ctx;
     on_transcoded_frame _on_frame;
+
+    // 用于追踪编码器时间戳的计数器
+    int64_t _next_encoder_pts = 0;
     
     // 【新增】音频FIFO缓冲区
     AVAudioFifo *_audio_fifo = nullptr;
@@ -853,11 +856,15 @@ public:
     void encode_frame(AVFrame *frame_in, uint64_t dts, uint64_t pts) {
         if (!_encoder_ctx) return;
         
-        if (frame_in) {
-            frame_in->pts = av_rescale_q(pts, {1, 1000}, _encoder_ctx->time_base);
+        AVFrame *frame_to_send = frame_in;
+        if (frame_to_send) {
+            // 【关键】: 使用我们自己维护的、基于样本数的时间戳
+            frame_to_send->pts = _next_encoder_pts;
+            // 编码器每消耗一帧(frame_size个样本)，我们的时间戳就前进相应的数量
+            _next_encoder_pts += frame_to_send->nb_samples;
         }
 
-        if (avcodec_send_frame(_encoder_ctx.get(), frame_in) == 0) {
+        if (avcodec_send_frame(_encoder_ctx.get(), frame_to_send) == 0) {
             while (true) {
                 auto pkt = alloc_av_packet();
                 int ret = avcodec_receive_packet(_encoder_ctx.get(), pkt.get());
