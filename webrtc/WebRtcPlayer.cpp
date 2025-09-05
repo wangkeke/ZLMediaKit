@@ -300,13 +300,13 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
     auto muxer = playSrc->getMuxer();
     if (muxer) {
         // 检查是否有专门的Opus轨道
-        auto opus_track = muxer->_opus_track;
+        auto opus_track = muxer->getOpusTrack();
         if (opus_track) {
             // 使用Opus轨道
             configure.audio.preferred_codec.clear();
             configure.audio.preferred_codec.emplace_back(CodecOpus);
             has_audio = true;
-            InfoL << "Using dedicated Opus track for WebRTC";
+            InfoL << ">>>>>>>>>>>>>>>>Using dedicated Opus track for WebRTC";
         } 
     }
 

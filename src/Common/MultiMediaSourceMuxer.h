@@ -206,6 +206,12 @@ public:
      */
     std::shared_ptr<MultiMediaSourceMuxer> getMuxer(MediaSource &sender) const override;
 
+    /**
+     * 获取Opus轨道引用
+     * Get Opus track reference
+     */
+    AudioTrackMuxer::Ptr getOpusTrack() const { return _opus_track; }
+
     const ProtocolOption &getOption() const;
     const MediaTuple &getMediaTuple() const;
     std::string shortUrl() const;
