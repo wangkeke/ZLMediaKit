@@ -1850,34 +1850,14 @@ static const string kH265Profile { "profile-id" };
 static const string kMode { "packetization-mode" };
 
 bool RtcConfigure::onCheckCodecProfile(const RtcCodecPlan &plan, CodecId codec) const {
-    // --- START OF MODIFICATION ---
-
-    if (_rtsp_audio_plan) {
-        // 我们正在处理一个有固定音频源的RTSP播放场景
-        auto src_codec = getCodecId(_rtsp_audio_plan->codec);
-
-        // 特例：如果源是AAC，而浏览器提供了Opus，这正是我们期望的转码场景。
-        // 在这种情况下，我们不关心采样率或通道数是否匹配，因为FFmpeg会处理好。
-        // 我们直接认为这是一个完美的匹配，返回true。
-        if (src_codec == CodecAAC && codec == CodecOpus) {
-            return true;
+    if (_rtsp_audio_plan && codec == getCodecId(_rtsp_audio_plan->codec)) {
+        if (plan.sample_rate != _rtsp_audio_plan->sample_rate || plan.channel != _rtsp_audio_plan->channel) {
+            // 音频采样率和通道数必须相同  [AUTO-TRANSLATED:6e591932]
+            // Audio sampling rate and number of channels must be the same
+            return false;
         }
-
-        // 对于其他情况（例如源和目标都是PCMA），我们执行原始的严格检查。
-        if (codec == src_codec) {
-            if (plan.sample_rate != _rtsp_audio_plan->sample_rate || plan.channel != _rtsp_audio_plan->channel) {
-                // 音频采样率和通道数必须相同
-                WarnL << "Audio parameters mismatch for codec " << getCodecName(codec)
-                      << ": offer(" << plan.sample_rate << "/" << plan.channel
-                      << ") vs source(" << _rtsp_audio_plan->sample_rate << "/" << _rtsp_audio_plan->channel << ")";
-                return false;
-            }
-            return true;
-        }
+        return true;
     }
-
-    // --- END OF MODIFICATION ---
-
     if (_rtsp_video_plan && codec == CodecH264 && getCodecId(_rtsp_video_plan->codec) == CodecH264) {
         // h264时，profile-level-id  [AUTO-TRANSLATED:94a5f360]
         // When h264, profile-level-id

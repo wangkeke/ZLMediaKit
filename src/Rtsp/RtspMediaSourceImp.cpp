@@ -1,10 +1,6 @@
 ﻿#include "RtspMediaSourceImp.h"
 #include "RtspDemuxer.h"
 #include "Common/config.h"
-#ifdef ENABLE_FFMPEG
-#include "Codec/AudioTrackMuxer.h"
-#endif
-
 namespace mediakit {
 void RtspMediaSource::setSdp(const std::string &sdp) {
     SdpParser sdp_parser(sdp);
@@ -54,11 +50,6 @@ void RtspMediaSource::setTimeStamp(uint32_t stamp) {
 }
 
 void RtspMediaSource::onWrite(RtpPacket::Ptr rtp, bool keyPos) {
-    
-    // ==================== 日志探针 A.0 ====================
-    InfoL << ">>>>>>>>>> 探针 A.0 - onWrite: 日志出现吧...";
-    // =======================================================
-    
     _speed[rtp->type] += rtp->size();
     assert(rtp->type >= 0 && rtp->type < TrackMax);
     auto &track = _tracks[rtp->type];
@@ -71,8 +62,6 @@ void RtspMediaSource::onWrite(RtpPacket::Ptr rtp, bool keyPos) {
         track->_ssrc = rtp->getSSRC();
     }
     if (!_ring) {
-        // 【探针】
-        InfoL << ">>>>>>>>>> RtspMediaSource::onWrite: Creating RingBuffer.";
         std::weak_ptr<RtspMediaSource> weakSelf = std::static_pointer_cast<RtspMediaSource>(shared_from_this());
         auto lam = [weakSelf](int size) {
             auto strongSelf = weakSelf.lock();
@@ -96,19 +85,12 @@ void RtspMediaSource::onWrite(RtpPacket::Ptr rtp, bool keyPos) {
 
 RtspMediaSourceImp::RtspMediaSourceImp(const MediaTuple& tuple, int ringSize): RtspMediaSource(tuple, ringSize)
 {
-    // 【探針】
-    InfoL << ">>>>>>>>>> RtspMediaSourceImp CONSTRUCTOR called for stream: " << tuple.shortUrl();
     _demuxer = std::make_shared<RtspDemuxer>();
     _demuxer->setTrackListener(this);
 }
 
 void RtspMediaSourceImp::setSdp(const std::string &strSdp)
 {
-
-    // ==================== 日志探针 A.0 ====================
-    InfoL << ">>>>>>>>>> 探针 A.0 - setSdp: 日志出现吧...";
-    // =======================================================
-
     if (!getSdp().empty()) {
         return;
     }
@@ -118,11 +100,6 @@ void RtspMediaSourceImp::setSdp(const std::string &strSdp)
 
 void RtspMediaSourceImp::onWrite(RtpPacket::Ptr rtp, bool key_pos)
 {
-
-    // ==================== 日志探针 A.0 ====================
-    InfoL << ">>>>>>>>>> 探针 A.0 - onWrite: 日志出现吧...";
-    // =======================================================
-
     if (_all_track_ready && !_muxer->isEnabled()) {
         // 获取到所有Track后，并且未开启转协议，那么不需要解复用rtp  [AUTO-TRANSLATED:31cbc558]
         // After getting all Tracks and not enabling protocol conversion, there is no need to demultiplex rtp
@@ -143,9 +120,7 @@ void RtspMediaSourceImp::onWrite(RtpPacket::Ptr rtp, bool key_pos)
 }
 
 void RtspMediaSourceImp::setProtocolOption(const ProtocolOption &option)
-{   
-    // 【探針】
-    InfoL << ">>>>>>>>>> RtspMediaSourceImp::setProtocolOption called.";
+{
     GET_CONFIG(bool, direct_proxy, Rtsp::kDirectProxy);
     // 开启直接代理模式时，rtsp直接代理，不重复产生；但是有些rtsp推流端，由于sdp中已有sps pps，rtp中就不再包括sps pps,  [AUTO-TRANSLATED:1bbc0e31]
     // When direct proxy mode is enabled, rtsp is directly proxied and not duplicated; however, some rtsp push stream ends, because there are already sps pps in the sdp, rtp no longer includes sps pps,
@@ -163,39 +138,6 @@ void RtspMediaSourceImp::setProtocolOption(const ProtocolOption &option)
     for (auto &track : _demuxer->getTracks(false)) {
         _muxer->addTrack(track);
         track->addDelegate(_muxer);
-        
-#ifdef ENABLE_FFMPEG
-        // 如果是AAC音频轨道，则创建Opus转码轨道
-        auto audio_track = std::dynamic_pointer_cast<AudioTrack>(track);
-        if (audio_track && audio_track->getCodecId() == CodecAAC) {
-            // ==================== 日志探针 A.1 ====================
-            InfoL << ">>>>>>>>>> 探针 A.1: Found AAC audio track. Creating transcoder...";
-            // =======================================================
-            
-            // 创建AAC到Opus的转码轨道
-            auto transcoded_track = std::make_shared<AudioTrackMuxer>(audio_track);
-            
-            // ==================== 日志探针 A.2 ====================
-            InfoL << ">>>>>>>>>> 探针 A.2: AudioTrackMuxer created. Adding it to muxer.";
-            // =======================================================
-
-            // 将转码后的Opus轨道也加入到Muxer中
-            _muxer->addTrack(transcoded_track);
-            
-            // ==================== 日志探针 A.3 ====================
-            InfoL << ">>>>>>>>>> 探针 A.3: Delegating original AAC track to AudioTrackMuxer.";
-            // =======================================================
-
-            // 让原始AAC轨道的数据流向转码轨道
-            audio_track->addDelegate(transcoded_track);
-        }else if (audio_track) {
-            // 非空，但不是 AAC
-            InfoL << ">>>>>>>>>> 探针 A.4: Track is not AAC, CodecId = " << audio_track->getCodecId();
-        } else {
-            // audio_track 本身就是空指针
-            WarnL << ">>>>>>>>>> 探针 A.5: audio_track is nullptr.";
-        }
-#endif
     }
 }
 

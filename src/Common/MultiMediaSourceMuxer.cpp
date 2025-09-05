@@ -12,6 +12,7 @@
 #include "Common/config.h"
 #include "MultiMediaSourceMuxer.h"
 #include "Thread/WorkThreadPool.h"
+#include "Codec/AudioTrackMuxer.h"
 
 using namespace std;
 using namespace toolkit;
@@ -645,6 +646,30 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
     if (_mp4) {
         ret = _mp4->addTrack(track) ? true : ret;
     }
+
+    // 【探针 A.0】: 开始查找AAC轨道
+    InfoL << ">>>>>>>>>> 探针 A.0: 开始查找AAC轨道 ...";
+    // AAC到Opus转码功能
+    auto audio_track = std::dynamic_pointer_cast<AudioTrack>(track);
+    if (audio_track && audio_track->getCodecId() == CodecAAC) {
+        InfoL << "Found AAC audio track in Muxer for stream [" << shortUrl() << "]. Creating Opus transcoder...";
+        
+        // 只将新的Opus轨道添加到RtspMuxer
+        if (_rtsp) {
+            // 创建转码轨道装饰器
+            auto transcoded_track = std::make_shared<AudioTrackMuxer>(audio_track);
+            if (_rtsp->addTrack(transcoded_track)) {
+                // 建立数据流委托，让原始AAC轨道的数据自动流向我们的转码器
+                audio_track->addDelegate(transcoded_track);
+                InfoL << "Opus transcoded track successfully added to RtspMuxer for stream [" << shortUrl() << "].";
+            } else {
+                WarnL << "Failed to add Opus transcoded track to RtspMuxer for stream [" << shortUrl() << "].";
+            }
+        } else {
+            WarnL << "RtspMuxer is not enabled, Opus track will not be added for stream [" << shortUrl() << "].";
+        }
+    }
+
     return ret;
 }
 
