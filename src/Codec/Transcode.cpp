@@ -16,6 +16,7 @@
 #include "Util/uv_errno.h"
 #include "Transcode.h"
 #include "Common/config.h"
+#include <fstream>
 #include <deque>
 
 #define MAX_DELAY_SECOND 3
@@ -948,8 +949,28 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 
     // 【重构回调链】
     _imp->_decoder->setOnDecode([this, frame_size](const FFmpegFrame::Ptr &pcm_frame) {
+        
+        // --- START OF DEBUG DUMP ---
+        // 【调试步骤2.1】: 导出解码后的原始PCM数据
+        // 这将告诉我们AAC解码器是否工作正常
+        {
+            std::ofstream pcm_dump_file("decoded_pcm.raw", std::ios::binary | std::ios::app);
+            pcm_dump_file.write((char*)pcm_frame->get()->data[0], pcm_frame->get()->linesize[0]);
+        }
+        // --- END OF DEBUG DUMP ---
+        
         auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
         if (!resampled_frame) return;
+
+
+        // --- START OF DEBUG DUMP ---
+        // 【调试步骤2.2】: 导出重采样后的PCM数据
+        // 这将告诉我们重采样器是否工作正常
+        {
+            std::ofstream pcm_dump_file("resampled_pcm.raw", std::ios::binary | std::ios::app);
+            pcm_dump_file.write((char*)resampled_frame->get()->data[0], resampled_frame->get()->linesize[0]);
+        }
+        // --- END OF DEBUG DUMP ---
 
         // a. 将重采样后的PCM数据写入FIFO
         av_audio_fifo_write(_imp->_audio_fifo, (void **)resampled_frame->get()->data, resampled_frame->get()->nb_samples);
