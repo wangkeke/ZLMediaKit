@@ -13,6 +13,7 @@
 #include "Common/config.h"
 #include "Extension/Factory.h"
 #include "Util/base64.h"
+#include "Common/MultiMediaSourceMuxer.h"
 
 using namespace std;
 
