@@ -658,13 +658,12 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
         if (_rtsp) {
             // 创建转码轨道装饰器
             auto transcoded_track = std::make_shared<AudioTrackMuxer>(audio_track);
-            if (_rtsp->addTrack(transcoded_track)) {
-                // 建立数据流委托，让原始AAC轨道的数据自动流向我们的转码器
-                audio_track->addDelegate(transcoded_track);
-                InfoL << "Opus transcoded track successfully added to RtspMuxer for stream [" << shortUrl() << "].";
-            } else {
-                WarnL << "Failed to add Opus transcoded track to RtspMuxer for stream [" << shortUrl() << "].";
-            }
+            // 建立数据流委托，让原始AAC轨道的数据自动流向我们的转码器
+            audio_track->addDelegate(transcoded_track);
+            // 存储Opus轨道引用，供WebRTC使用
+            _opus_track = transcoded_track;
+            
+            InfoL << "Opus transcoded track created for WebRTC use in stream [" << shortUrl() << "].";
         } else {
             WarnL << "RtspMuxer is not enabled, Opus track will not be added for stream [" << shortUrl() << "].";
         }

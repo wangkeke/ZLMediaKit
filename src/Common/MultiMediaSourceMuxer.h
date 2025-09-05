@@ -22,6 +22,7 @@
 #include "Rtmp/RtmpMediaSourceMuxer.h"
 #include "TS/TSMediaSourceMuxer.h"
 #include "FMP4/FMP4MediaSourceMuxer.h"
+#include "Codec/AudioTrackMuxer.h"
 
 namespace mediakit {
 
@@ -260,6 +261,7 @@ private:
     toolkit::Ticker _last_check;
     std::unordered_map<int, Stamp> _stamps;
     std::weak_ptr<Listener> _track_listener;
+    AudioTrackMuxer::Ptr _opus_track;  // 添加Opus轨道引用  // 添加Opus轨道引用
 #if defined(ENABLE_RTPPROXY)
     std::unordered_multimap<std::string, std::tuple<RingType::RingReader::Ptr, std::weak_ptr<RtpSender>>> _rtp_sender;
 #endif // ENABLE_RTPPROXY

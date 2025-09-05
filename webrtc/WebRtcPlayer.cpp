@@ -288,8 +288,6 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
     configure.audio.direction = RtpDirection::sendonly;
     configure.video.direction = RtpDirection::sendonly;
 
-    // --- START OF FINAL MODIFICATION ---
-
     // 直接从 MediaSource 获取当前所有可用的、就绪的轨道
     // getTracks(true) 返回的轨道列表，包含了我们动态添加的 AudioTrackMuxer
     auto tracks = playSrc->getTracks(true);
@@ -297,16 +295,31 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
     bool has_audio = false;
     bool has_video = false;
 
-        // 遍历所有可用轨道，手动构建 RtcConfigure
-    for (const auto &track : tracks) {
-        if (track->getTrackType() == TrackAudio) {
+    // 获取MultiMediaSourceMuxer以访问Opus轨道
+    auto muxer = playSrc->getMuxer();
+    if (muxer) {
+        // 检查是否有专门的Opus轨道
+        auto opus_track = muxer->_opus_track;
+        if (opus_track) {
+            // 使用Opus轨道
+            configure.audio.preferred_codec.clear();
+            configure.audio.preferred_codec.emplace_back(CodecOpus);
             has_audio = true;
-            if (track->getCodecId() == CodecOpus) {
-                // 【优先选择Opus】
-                configure.audio.preferred_codec.clear();
-                configure.audio.preferred_codec.emplace_back(CodecOpus);
-                // 找到最优的Opus后，就不再关心其他音频轨道了
-                break; 
+            InfoL << "Using dedicated Opus track for WebRTC";
+        } 
+    }
+
+    if(!has_audio){
+        for (const auto &track : tracks) {
+            if (track->getTrackType() == TrackAudio) {
+                if (track->getCodecId() == CodecOpus) {
+                    // 【优先选择Opus】
+                    configure.audio.preferred_codec.clear();
+                    configure.audio.preferred_codec.emplace_back(CodecOpus);
+                    has_audio = true;
+                    // 找到最优的Opus后，就不再关心其他音频轨道了
+                    break; 
+                }
             }
         }
     }
@@ -334,8 +347,6 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
 
     // 【关键】不再调用 configure.setPlayRtspInfo()，因为它只会读取旧的静态SDP。
     // 我们已经通过直接设置 preferred_codec 来完成了轨道选择。
-    
-    // --- END OF FINAL MODIFICATION ---
 }
 
 void WebRtcPlayer::sendConfigFrames(uint32_t before_seq, uint32_t sample_rate, uint32_t timestamp, uint64_t ntp_timestamp) {
