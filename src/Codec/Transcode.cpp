@@ -962,27 +962,15 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
     // 【重构回调链】
     _imp->_decoder->setOnDecode([this, frame_size](const FFmpegFrame::Ptr &pcm_frame) {
         
-        // --- START OF DEBUG DUMP ---
-        // 【调试步骤2.1】: 导出解码后的原始PCM数据
-        // 这将告诉我们AAC解码器是否工作正常
-        {
-            std::ofstream pcm_dump_file("decoded_pcm.raw", std::ios::binary | std::ios::app);
-            pcm_dump_file.write((char*)pcm_frame->get()->data[0], pcm_frame->get()->linesize[0]);
-        }
-        // --- END OF DEBUG DUMP ---
+        // ==================== 日志探针 C.2 ====================
+        InfoL << ">>>>>>>>>> 探针 C.2: Transcode's setOnDecode CALLBACK triggered! A PCM frame was successfully decoded. Samples: " << pcm_frame->get()->nb_samples;
+        // =====================================================
         
         auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
-        if (!resampled_frame) return;
-
-
-        // --- START OF DEBUG DUMP ---
-        // 【调试步骤2.2】: 导出重采样后的PCM数据
-        // 这将告诉我们重采样器是否工作正常
-        {
-            std::ofstream pcm_dump_file("resampled_pcm.raw", std::ios::binary | std::ios::app);
-            pcm_dump_file.write((char*)resampled_frame->get()->data[0], resampled_frame->get()->linesize[0]);
+        if (!resampled_frame) {
+            WarnL << ">>>>>>>>>> 探针 C.2-WARN: Resampling failed.";
+            return;
         }
-        // --- END OF DEBUG DUMP ---
 
         // a. 将重采样后的PCM数据写入FIFO
         av_audio_fifo_write(_imp->_audio_fifo, (void **)resampled_frame->get()->data, resampled_frame->get()->nb_samples);
@@ -990,6 +978,9 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
         // b. 循环地从FIFO中读取固定大小的帧并送去编码
         while (av_audio_fifo_size(_imp->_audio_fifo) >= frame_size) {
             av_audio_fifo_read(_imp->_audio_fifo, (void **)_imp->_fifo_frame->data, frame_size);
+            // ==================== 日志探针 C.3 ====================
+            InfoL << ">>>>>>>>>> 探针 C.3: Sending a fixed-size PCM frame to Opus encoder.";
+            // =====================================================
             // c. 将这个大小正好的帧送去编码
             _imp->encode_frame(_imp->_fifo_frame.get(), pcm_frame->get()->pkt_dts, pcm_frame->get()->pts);
         }
@@ -999,8 +990,13 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 }
 
 void Transcode::inputFrame(const Frame::Ptr &frame) {
-    if (_imp->_decoder) {
+    // ==================== 日志探针 C.1 ====================
+    InfoL << ">>>>>>>>>> 探针 C.1: Transcode::inputFrame called! Forwarding to FFmpegDecoder.";
+    // =====================================================
+    if (_imp && _imp->_decoder) {
         _imp->_decoder->inputFrame(frame, false, false);
+    } else {
+        WarnL << ">>>>>>>>>> 探针 C.1-ERROR: Transcode not opened or decoder is null!";
     }
 }
 

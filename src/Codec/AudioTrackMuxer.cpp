@@ -26,10 +26,17 @@ AudioTrackMuxer::AudioTrackMuxer(const AudioTrack::Ptr &origin_track) :
 }
 
 bool AudioTrackMuxer::inputFrame(const Frame::Ptr &frame) {
+    // ==================== 日志探针 B ====================
+    InfoL << ">>>>>>>>>> 探针 B: AudioTrackMuxer::inputFrame called! Codec: " 
+          << frame->getCodecName() << ", Size: " << frame->size() << ", DTS: " << frame->dts();
+    // ===================================================
+
 #ifdef ENABLE_FFMPEG
     if (_transcode) {
-        // 【修正1, 2, 3】: inputFrame不返回值，结果通过回调处理
         _transcode->inputFrame(frame);
+    } else {
+        // 【新增】这是一个重要的检查点
+        WarnL << ">>>>>>>>>> 探针 B-ERROR: _transcode is nullptr in AudioTrackMuxer, cannot process frame!";
     }
 #endif
     return true;

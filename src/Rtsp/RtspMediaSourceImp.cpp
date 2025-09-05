@@ -147,12 +147,32 @@ void RtspMediaSourceImp::setProtocolOption(const ProtocolOption &option)
         // 如果是AAC音频轨道，则创建Opus转码轨道
         auto audio_track = std::dynamic_pointer_cast<AudioTrack>(track);
         if (audio_track && audio_track->getCodecId() == CodecAAC) {
+            // ==================== 日志探针 A.1 ====================
+            InfoL << ">>>>>>>>>> 探针 A.1: Found AAC audio track. Creating transcoder...";
+            // =======================================================
+            
             // 创建AAC到Opus的转码轨道
             auto transcoded_track = std::make_shared<AudioTrackMuxer>(audio_track);
+            
+            // ==================== 日志探针 A.2 ====================
+            InfoL << ">>>>>>>>>> 探针 A.2: AudioTrackMuxer created. Adding it to muxer.";
+            // =======================================================
+
             // 将转码后的Opus轨道也加入到Muxer中
             _muxer->addTrack(transcoded_track);
+            
+            // ==================== 日志探针 A.3 ====================
+            InfoL << ">>>>>>>>>> 探针 A.3: Delegating original AAC track to AudioTrackMuxer.";
+            // =======================================================
+
             // 让原始AAC轨道的数据流向转码轨道
             audio_track->addDelegate(transcoded_track);
+        }else if (audio_track) {
+            // 非空，但不是 AAC
+            InfoL << ">>>>>>>>>> 探针 A.4: Track is not AAC, CodecId = " << audio_track->getCodecId();
+        } else {
+            // audio_track 本身就是空指针
+            WarnL << ">>>>>>>>>> 探针 A.5: audio_track is nullptr.";
         }
 #endif
     }
