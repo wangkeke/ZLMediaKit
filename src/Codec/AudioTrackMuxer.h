@@ -3,9 +3,7 @@
 
 #include "Extension/Track.h" // AudioTrackImp 定义在这里
 
-namespace mediakit {
-    class Transcode;
-}
+#include "Codec/Transcode.h"
 
 namespace mediakit {
 
