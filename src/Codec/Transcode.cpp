@@ -16,6 +16,7 @@
 #include "Util/uv_errno.h"
 #include "Transcode.h"
 #include "Common/config.h"
+#include "Common/Stamp.h"  // 添加Stamp头文件包含
 #include <fstream>
 #include <deque>
 
@@ -842,7 +843,6 @@ std::tuple<bool, std::string> FFmpegUtils::saveFrame(const FFmpegFrame::Ptr &fra
     return make_tuple<bool, std::string>(true, "");
 }
 
-// --- START OF FINAL Transcode IMPLEMENTATION ---
 
 class Transcode::Imp {
 public:
@@ -850,71 +850,140 @@ public:
     FFmpegSwr::Ptr _swr;
     std::shared_ptr<AVCodecContext> _encoder_ctx;
     on_transcoded_frame _on_frame;
-
-    // 用于追踪编码器时间戳的计数器
-    int64_t _next_encoder_pts = 0;
-    
-    // 【新增】音频FIFO缓冲区
+    Stamp _stamp;
+    uint64_t _next_output_pts_ms = 0;
+    int _frame_size = 0;
+    int _sample_rate = 0;
+    bool _first_frame = true;
     AVAudioFifo *_audio_fifo = nullptr;
-    // 【新增】用于从FIFO读取数据的临时AVFrame
     std::shared_ptr<AVFrame> _fifo_frame;
 
     ~Imp() {
         if (_audio_fifo) {
             av_audio_fifo_free(_audio_fifo);
-            _audio_fifo = nullptr;
         }
     }
     
-    void encode_frame(AVFrame *frame_in, uint64_t dts, uint64_t pts) {
+    void encode_frame(AVFrame *frame_to_encode, uint64_t pts_ms) {
         if (!_encoder_ctx) return;
         
-        AVFrame *frame_to_send = frame_in;
-        if (frame_to_send) {
-            // 【关键】: 使用我们自己维护的、基于样本数的时间戳
-            frame_to_send->pts = _next_encoder_pts;
-            // 编码器每消耗一帧(frame_size个样本)，我们的时间戳就前进相应的数量
-            _next_encoder_pts += frame_to_send->nb_samples;
+        if (frame_to_encode) {
+            frame_to_encode->pts = av_rescale_q(pts_ms, {1, 1000}, _encoder_ctx->time_base);
         }
 
-        if (avcodec_send_frame(_encoder_ctx.get(), frame_to_send) == 0) {
-            while (true) {
-                auto pkt = alloc_av_packet();
-                int ret = avcodec_receive_packet(_encoder_ctx.get(), pkt.get());
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                    break;
-                }
-                if (ret < 0) {
-                    WarnL << "FFmpeg encoding failed: " << ffmpeg_err(ret);
-                    break;
-                }
-                
-                auto out_dts = av_rescale_q(pkt->dts, _encoder_ctx->time_base, {1, 1000});
-                auto out_pts = av_rescale_q(pkt->pts, _encoder_ctx->time_base, {1, 1000});
+        int ret = avcodec_send_frame(_encoder_ctx.get(), frame_to_encode);
+        if (ret < 0 && ret != AVERROR_EOF) {
+            WarnL << "avcodec_send_frame failed: " << ffmpeg_err(ret);
+            return;
+        }
 
-                auto frame = std::make_shared<FrameFromPtr>(get_codec_id(_encoder_ctx->codec_id), (char*)pkt->data, pkt->size, out_dts, out_pts);
-                if (_on_frame) {
-                    _on_frame(frame);
-                }
+        while (true) {
+            auto pkt = alloc_av_packet();
+            ret = avcodec_receive_packet(_encoder_ctx.get(), pkt.get());
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                break;
+            }
+            if (ret < 0) {
+                WarnL << "FFmpeg encoding failed: " << ffmpeg_err(ret);
+                break;
+            }
+            
+            auto out_dts = av_rescale_q(pkt->dts, _encoder_ctx->time_base, {1, 1000});
+            auto out_pts = av_rescale_q(pkt->pts, _encoder_ctx->time_base, {1, 1000});
+
+            auto frame = std::make_shared<FrameFromPtr>(
+                get_codec_id(_encoder_ctx->codec_id), 
+                (char*)pkt->data, 
+                pkt->size, 
+                out_dts, 
+                out_pts
+            );
+            
+            if (_on_frame) {
+                _on_frame(frame);
             }
         }
     }
+    
+    // 修正的FIFO刷新方法
+    void flush_fifo() {
+        if (!_audio_fifo || !_encoder_ctx || !_fifo_frame) return;
+        
+        while (av_audio_fifo_size(_audio_fifo) > 0) {
+            int available_samples = av_audio_fifo_size(_audio_fifo);
+            int read_samples = (available_samples < _frame_size) ? available_samples : _frame_size;
+
+            // 先清零整个帧
+            av_frame_make_writable(_fifo_frame.get());
+            // 使用memset清零代替av_samples_set_silence
+            for (int i = 0; i < _fifo_frame->ch_layout.nb_channels; i++) {
+                memset(_fifo_frame->data[i], 0, _frame_size * av_get_bytes_per_sample((AVSampleFormat)_fifo_frame->format));
+            }
+            
+            // 如果有数据可读取
+            if (read_samples > 0) {
+                // 读取可用的样本
+                int result = av_audio_fifo_read(_audio_fifo, (void **)_fifo_frame->data, read_samples);
+                if (result <= 0) {
+                    WarnL << "Failed to read from audio FIFO during flush";
+                    break;
+                }
+                
+                // 如果读取的样本数少于帧大小，用零填充剩余部分
+                if (read_samples < _frame_size) {
+                    for (int i = 0; i < _fifo_frame->ch_layout.nb_channels; i++) {
+                        memset(_fifo_frame->data[i] + read_samples * av_get_bytes_per_sample((AVSampleFormat)_fifo_frame->format), 
+                               0, 
+                               (_frame_size - read_samples) * av_get_bytes_per_sample((AVSampleFormat)_fifo_frame->format));
+                    }
+                }
+            }
+            
+            _fifo_frame->nb_samples = _frame_size; // 始终发送完整帧大小
+            
+            uint64_t output_pts = get_next_pts();
+            encode_frame(_fifo_frame.get(), output_pts);
+            
+            // 如果读取的样本少于帧大小，说明这是最后一帧
+            if (read_samples < _frame_size) {
+                break;
+            }
+        }
+    }
+    
+    uint64_t get_next_pts() {
+        uint64_t pts = _next_output_pts_ms;
+        _next_output_pts_ms += (_frame_size * 1000) / _sample_rate;
+        return pts;
+    }
 };
 
-Transcode::Transcode() : _imp(new Imp()) {}
-Transcode::~Transcode() = default;
+// 【修正1】: 将所有Transcode的成员函数实现，移动到 Imp 类定义之后
+Transcode::Transcode() {
+    _imp = std::make_unique<Imp>();
+}
+
+Transcode::~Transcode() {
+#ifdef ENABLE_FFMPEG
+    if (_imp) {
+        flush();
+    }
+#endif
+}
 
 bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_samplerate, int dst_channels) {
     auto audio_track = std::dynamic_pointer_cast<AudioTrack>(src_track);
-    if (!audio_track) {
-        WarnL << "Transcode::open failed: source track is not an audio track.";
-        return false;
-    }
+    if (!audio_track) { return false; }
 
     _imp->_decoder = std::make_shared<FFmpegDecoder>(src_track);
 
-    dst_samplerate = dst_samplerate > 0 ? dst_samplerate : audio_track->getAudioSampleRate();
+    if (dst_codec == CodecOpus) {
+        dst_samplerate = 48000;
+    } else {
+        dst_samplerate = dst_samplerate > 0 ? dst_samplerate : audio_track->getAudioSampleRate();
+    }
     dst_channels = dst_channels > 0 ? dst_channels : audio_track->getAudioChannel();
+    _imp->_sample_rate = dst_samplerate;
 
 #if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
     AVChannelLayout ch_layout;
@@ -927,62 +996,97 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 #endif
 
     const AVCodec *encoder = avcodec_find_encoder(get_avcodec_id(dst_codec));
-    // ... (encoder and encoder_ctx creation logic remains the same) ...
-
-    // 【新增】获取编码器期望的帧大小
-    int frame_size = _imp->_encoder_ctx->frame_size;
-    if (frame_size == 0) {
-        // 如果编码器没有指定，对于Opus@48k，20ms是标准大小
-        frame_size = 960; 
+    if (!encoder) { return false; }
+    
+    _imp->_encoder_ctx.reset(avcodec_alloc_context3(encoder), [](AVCodecContext *ctx) {
+        avcodec_free_context(&ctx);
+    });
+    
+    _imp->_encoder_ctx->sample_fmt = AV_SAMPLE_FMT_S16;
+    _imp->_encoder_ctx->sample_rate = dst_samplerate;
+    _imp->_encoder_ctx->time_base = {1, dst_samplerate};
+    
+#if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
+    // 【修正5】: 使用新的 ch_layout API
+    av_channel_layout_default(&_imp->_encoder_ctx->ch_layout, dst_channels);
+#else
+    _imp->_encoder_ctx->channels = dst_channels;
+    _imp->_encoder_ctx->channel_layout = av_get_default_channel_layout(dst_channels);
+#endif
+    
+    AVDictionary *opts = nullptr;
+    if (dst_codec == CodecOpus) {
+        _imp->_encoder_ctx->bit_rate = 64000;
+        av_dict_set(&opts, "application", "voip", 0);
+        av_dict_set(&opts, "compression_level", "10", 0);
+        av_dict_set(&opts, "vbr", "on", 0);
     }
 
-    // 【新增】创建并初始化音频FIFO
-    _imp->_audio_fifo = av_audio_fifo_alloc(_imp->_encoder_ctx->sample_fmt, dst_channels, frame_size * 2);
+    if (avcodec_open2(_imp->_encoder_ctx.get(), encoder, &opts) < 0) {
+        av_dict_free(&opts);
+        return false;
+    }
+    av_dict_free(&opts);
+
+    int frame_size = _imp->_encoder_ctx->frame_size ? _imp->_encoder_ctx->frame_size : 960;
+    _imp->_frame_size = frame_size;
+    
+    _imp->_audio_fifo = av_audio_fifo_alloc(_imp->_encoder_ctx->sample_fmt, _imp->_encoder_ctx->ch_layout.nb_channels, frame_size * 4);
     if (!_imp->_audio_fifo) {
-        WarnL << "Failed to allocate audio FIFO";
         return false;
     }
     
-    // 【新增】创建用于从FIFO读取数据的临时帧
     _imp->_fifo_frame.reset(av_frame_alloc(), [](AVFrame *ptr){ av_frame_free(&ptr); });
     _imp->_fifo_frame->nb_samples = frame_size;
     _imp->_fifo_frame->sample_rate = dst_samplerate;
+    _imp->_fifo_frame->format = _imp->_encoder_ctx->sample_fmt;
+
 #if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
+    // 【修正5】: 使用新的 ch_layout API
     av_channel_layout_copy(&_imp->_fifo_frame->ch_layout, &_imp->_encoder_ctx->ch_layout);
 #else
     _imp->_fifo_frame->channel_layout = _imp->_encoder_ctx->channel_layout;
     _imp->_fifo_frame->channels = _imp->_encoder_ctx->channels;
 #endif
-    _imp->_fifo_frame->format = _imp->_encoder_ctx->sample_fmt;
+
     if (av_frame_get_buffer(_imp->_fifo_frame.get(), 0) < 0) {
-        WarnL << "Failed to allocate buffer for FIFO frame";
         return false;
     }
 
-    // 【重构回调链】
     _imp->_decoder->setOnDecode([this, frame_size](const FFmpegFrame::Ptr &pcm_frame) {
-        
-        // ==================== 日志探针 C.2 ====================
-        InfoL << ">>>>>>>>>> 探针 C.2: Transcode's setOnDecode CALLBACK triggered! A PCM frame was successfully decoded. Samples: " << pcm_frame->get()->nb_samples;
-        // =====================================================
-        
         auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
-        if (!resampled_frame) {
-            WarnL << ">>>>>>>>>> 探针 C.2-WARN: Resampling failed.";
-            return;
+        if (!resampled_frame) return;
+
+        // 使用ZLMediaKit的Stamp类进行时间戳平滑处理
+        int64_t dts_ms, pts_ms;
+        _imp->_stamp.revise(pcm_frame->get()->pkt_dts, pcm_frame->get()->pts, dts_ms, pts_ms, false);
+        
+        // 只在第一帧时设置起始时间戳
+        if (_imp->_first_frame) {
+            _imp->_next_output_pts_ms = pts_ms;
+            _imp->_first_frame = false;
         }
 
-        // a. 将重采样后的PCM数据写入FIFO
-        av_audio_fifo_write(_imp->_audio_fifo, (void **)resampled_frame->get()->data, resampled_frame->get()->nb_samples);
+        int written = av_audio_fifo_write(_imp->_audio_fifo, 
+                                        (void **)resampled_frame->get()->data, 
+                                        resampled_frame->get()->nb_samples);
+        if (written != resampled_frame->get()->nb_samples) {
+            WarnL << "av_audio_fifo_write incomplete: wrote " << written 
+                  << " of " << resampled_frame->get()->nb_samples << " samples";
+        }
 
-        // b. 循环地从FIFO中读取固定大小的帧并送去编码
         while (av_audio_fifo_size(_imp->_audio_fifo) >= frame_size) {
-            av_audio_fifo_read(_imp->_audio_fifo, (void **)_imp->_fifo_frame->data, frame_size);
-            // ==================== 日志探针 C.3 ====================
-            InfoL << ">>>>>>>>>> 探针 C.3: Sending a fixed-size PCM frame to Opus encoder.";
-            // =====================================================
-            // c. 将这个大小正好的帧送去编码
-            _imp->encode_frame(_imp->_fifo_frame.get(), pcm_frame->get()->pkt_dts, pcm_frame->get()->pts);
+            int read = av_audio_fifo_read(_imp->_audio_fifo, 
+                                        (void **)_imp->_fifo_frame->data, 
+                                        frame_size);
+            if (read != frame_size) {
+                WarnL << "av_audio_fifo_read incomplete: read " << read 
+                      << " of " << frame_size << " samples";
+                break;
+            }
+
+            uint64_t output_pts = _imp->get_next_pts();
+            _imp->encode_frame(_imp->_fifo_frame.get(), output_pts);
         }
     });
 
@@ -990,21 +1094,26 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 }
 
 void Transcode::inputFrame(const Frame::Ptr &frame) {
-    // ==================== 日志探针 C.1 ====================
-    InfoL << ">>>>>>>>>> 探针 C.1: Transcode::inputFrame called! Forwarding to FFmpegDecoder.";
-    // =====================================================
     if (_imp && _imp->_decoder) {
         _imp->_decoder->inputFrame(frame, false, false);
-    } else {
-        WarnL << ">>>>>>>>>> 探针 C.1-ERROR: Transcode not opened or decoder is null!";
+    }
+}
+
+void Transcode::flush() {
+    if (_imp) {
+        _imp->flush_fifo();
+        if (_imp->_encoder_ctx) {
+            _imp->encode_frame(nullptr, 0);
+        }
     }
 }
 
 void Transcode::setOnFrame(on_transcoded_frame cb) {
-    _imp->_on_frame = std::move(cb);
+    if (_imp) {
+        _imp->_on_frame = std::move(cb);
+    }
 }
 
-// --- END OF FINAL Transcode IMPLEMENTATION ---
 
 } // namespace mediakit
 #endif // ENABLE_FFMPEG

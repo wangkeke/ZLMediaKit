@@ -65,6 +65,9 @@ public:
      */
     void setOnFrame(on_transcoded_frame cb);
 
+    // 【修正6】: 添加 flush 方法的声明
+    void flush();
+
 private:
     // 使用PIMPL模式隐藏所有FFmpeg的复杂实现细节
     class Imp; 

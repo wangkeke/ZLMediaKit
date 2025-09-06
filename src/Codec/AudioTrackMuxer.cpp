@@ -26,11 +26,6 @@ AudioTrackMuxer::AudioTrackMuxer(const AudioTrack::Ptr &origin_track) :
 }
 
 bool AudioTrackMuxer::inputFrame(const Frame::Ptr &frame) {
-    // ==================== 日志探针 B ====================
-    InfoL << ">>>>>>>>>> 探针 B: AudioTrackMuxer::inputFrame called! Codec: " 
-          << frame->getCodecName() << ", Size: " << frame->size() << ", DTS: " << frame->dts();
-    // ===================================================
-
 #ifdef ENABLE_FFMPEG
     if (_transcode) {
         _transcode->inputFrame(frame);
