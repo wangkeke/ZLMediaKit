@@ -8,10 +8,10 @@ AudioTrackMuxer::AudioTrackMuxer(const AudioTrack::Ptr &origin_track) :
     AudioTrackImp(CodecOpus, 48000, origin_track->getAudioChannel(), 16),
     _origin_track(origin_track)
 {
-#ifdef ENABLE_FFMPEG
     // 创建并打开我们新的Transcode类
     _transcode = std::make_shared<Transcode>();
     if (_transcode->open(origin_track, CodecOpus, 48000, getAudioChannel())) {
+        InfoL << ">>>>>>>>>>>>>>>>>>>>>Successfully opened AAC to Opus transcoder via Transcode class";
         // 【修正1, 2, 3】: 将转码结果通过回调送入本轨道
         _transcode->setOnFrame([this](const Frame::Ptr &opus_frame){
             if (opus_frame) {
@@ -19,21 +19,18 @@ AudioTrackMuxer::AudioTrackMuxer(const AudioTrack::Ptr &origin_track) :
             }
         });
     }else {
-        WarnL << "Failed to open AAC to Opus transcoder via Transcode class";
+        WarnL << ">>>>>>>>>>>>>>>>>>>>>Failed to open AAC to Opus transcoder via Transcode class";
         _transcode = nullptr;
     }
-#endif
 }
 
 bool AudioTrackMuxer::inputFrame(const Frame::Ptr &frame) {
-#ifdef ENABLE_FFMPEG
     if (_transcode) {
         _transcode->inputFrame(frame);
     } else {
         // 【新增】这是一个重要的检查点
         WarnL << ">>>>>>>>>> 探针 B-ERROR: _transcode is nullptr in AudioTrackMuxer, cannot process frame!";
     }
-#endif
     return true;
 }
 
