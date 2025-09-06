@@ -1054,8 +1054,31 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
     }
 
     _imp->_decoder->setOnDecode([this, frame_size](const FFmpegFrame::Ptr &pcm_frame) {
+        
+        // 【探针 1】: 导出解码后的原始PCM数据
+        // 这个文件将告诉我们，AAC解码器是否正常工作。
+        try {
+            std::ofstream pcm_dump_file("./decoded_pcm.raw", std::ios::binary | std::ios::app);
+            if (pcm_dump_file) {
+                pcm_dump_file.write((char*)pcm_frame->get()->data[0], pcm_frame->get()->linesize[0]);
+            }
+        } catch(std::exception &ex) {
+            WarnL << "Failed to write decoded_pcm.raw: " << ex.what();
+        }
+        
         auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
         if (!resampled_frame) return;
+
+        // 【探针 2】: 导出重采样后的PCM数据
+        // 这个文件将告诉我们，FFmpegSwr重采样器是否正常工作。
+        try {
+            std::ofstream resampled_dump_file("./resampled_pcm.raw", std::ios::binary | std::ios::app);
+            if (resampled_dump_file) {
+                resampled_dump_file.write((char*)resampled_frame->get()->data[0], resampled_frame->get()->linesize[0]);
+            }
+        } catch(std::exception &ex) {
+            WarnL << "Failed to write resampled_pcm.raw: " << ex.what();
+        }
 
         // 使用ZLMediaKit的Stamp类进行时间戳平滑处理
         int64_t dts_ms, pts_ms;
