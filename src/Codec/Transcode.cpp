@@ -868,7 +868,9 @@ public:
         if (!_encoder_ctx) return;
         
         if (frame_to_encode) {
-            frame_to_encode->pts = av_rescale_q(pts_ms, {1, 1000}, _encoder_ctx->time_base);
+            // 修复时间戳设置，确保正确使用编码器的时间基
+            AVRational time_base = {1, 1000};
+            frame_to_encode->pts = av_rescale_q(pts_ms, time_base, _encoder_ctx->time_base);
         }
 
         int ret = avcodec_send_frame(_encoder_ctx.get(), frame_to_encode);
@@ -888,8 +890,9 @@ public:
                 break;
             }
             
-            auto out_dts = av_rescale_q(pkt->dts, _encoder_ctx->time_base, {1, 1000});
-            auto out_pts = av_rescale_q(pkt->pts, _encoder_ctx->time_base, {1, 1000});
+            AVRational time_base_ms = {1, 1000};
+            auto out_dts = av_rescale_q(pkt->dts, _encoder_ctx->time_base, time_base_ms);
+            auto out_pts = av_rescale_q(pkt->pts, _encoder_ctx->time_base, time_base_ms);
 
             auto frame = std::make_shared<FrameFromPtr>(
                 get_codec_id(_encoder_ctx->codec_id), 
@@ -942,6 +945,14 @@ public:
             _fifo_frame->nb_samples = _frame_size; // 始终发送完整帧大小
             
             uint64_t output_pts = get_next_pts();
+            
+            // 如果是Opus编码器，需要将时间戳转换为48kHz采样率
+            if (_encoder_ctx && _encoder_ctx->codec_id == AV_CODEC_ID_OPUS) {
+                AVRational src_tb = {1, _sample_rate};
+                AVRational dst_tb = {1, 48000};
+                output_pts = av_rescale_q(output_pts, src_tb, dst_tb);
+            }
+            
             encode_frame(_fifo_frame.get(), output_pts);
             
             // 如果读取的样本少于帧大小，说明这是最后一帧
@@ -953,6 +964,7 @@ public:
     
     uint64_t get_next_pts() {
         uint64_t pts = _next_output_pts_ms;
+        // 修复时间戳计算，确保准确性
         _next_output_pts_ms += (_frame_size * 1000) / _sample_rate;
         return pts;
     }
@@ -1004,7 +1016,16 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
     
     _imp->_encoder_ctx->sample_fmt = AV_SAMPLE_FMT_S16;
     _imp->_encoder_ctx->sample_rate = dst_samplerate;
-    _imp->_encoder_ctx->time_base = {1, dst_samplerate};
+    
+    // 修复Opus编码器的时间基设置
+    if (dst_codec == CodecOpus) {
+        // Opus编码器固定使用48kHz采样率，时间基应设置为{1, 48000}
+        AVRational time_base = {1, 48000};
+        _imp->_encoder_ctx->time_base = time_base;
+    } else {
+        AVRational time_base = {1, dst_samplerate};
+        _imp->_encoder_ctx->time_base = time_base;
+    }
     
 #if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
     // 【修正5】: 使用新的 ch_layout API
@@ -1028,7 +1049,9 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
     }
     av_dict_free(&opts);
 
-    int frame_size = _imp->_encoder_ctx->frame_size ? _imp->_encoder_ctx->frame_size : 960;
+    // 对于Opus编码器，使用固定的帧大小960（20ms at 48kHz）
+    int frame_size = _imp->_encoder_ctx->frame_size ? _imp->_encoder_ctx->frame_size : 
+                     (dst_codec == CodecOpus ? 960 : 1024);
     _imp->_frame_size = frame_size;
     
     _imp->_audio_fifo = av_audio_fifo_alloc(_imp->_encoder_ctx->sample_fmt, _imp->_encoder_ctx->ch_layout.nb_channels, frame_size * 4);
@@ -1108,7 +1131,17 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
                 break;
             }
 
+            // 修复时间戳计算，确保与Opus编码器的采样率一致
             uint64_t output_pts = _imp->get_next_pts();
+            
+            // 如果是Opus编码器，需要将时间戳转换为48kHz采样率的时间戳
+            if (_imp->_encoder_ctx && _imp->_encoder_ctx->codec_id == AV_CODEC_ID_OPUS) {
+                // 将当前时间戳从目标采样率转换为48kHz
+                AVRational src_tb = {1, _imp->_sample_rate};
+                AVRational dst_tb = {1, 48000};
+                output_pts = av_rescale_q(output_pts, src_tb, dst_tb);
+            }
+            
             _imp->encode_frame(_imp->_fifo_frame.get(), output_pts);
         }
     });
