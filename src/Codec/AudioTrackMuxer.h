@@ -44,11 +44,9 @@ public:
 
 private:
     AudioTrack::Ptr _origin_track;
-#ifdef ENABLE_FFMPEG
     // 编译器在这里只需要知道 Transcode 是一个类型就足够了，
     // 因为我们只声明了一个智能指针，并没有访问它的任何成员
     std::shared_ptr<Transcode> _transcode;
-#endif
 };
 
 } // namespace mediakit
