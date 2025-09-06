@@ -3,13 +3,9 @@
 
 #include "Extension/Track.h" // AudioTrackImp 定义在这里
 
-#ifdef ENABLE_FFMPEG
-// 【关键】使用前向声明，而不是包含完整的 "Transcode.h"
-// 这可以避免头文件循环依赖，是C++的最佳实践
 namespace mediakit {
     class Transcode;
 }
-#endif
 
 namespace mediakit {
 
