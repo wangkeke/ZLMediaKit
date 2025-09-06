@@ -928,14 +928,14 @@ Transcode::~Transcode() {
 }
 
 bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_samplerate, int dst_channels) {
-    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>Transcode::open " << src_track->getCodecName() << " to " << get_codec_name(dst_codec);
+    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>Transcode::open ";
     
     if (_imp->_decoder) {
         _imp->_decoder->stopThread(true);
     }
     auto audio_track = std::dynamic_pointer_cast<AudioTrack>(src_track);
     if (!audio_track) { return false; }
-    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 1"
+    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 1";
     _imp->_decoder = std::make_shared<FFmpegDecoder>(src_track);
     
     dst_samplerate = 48000;
@@ -954,7 +954,7 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 
     const AVCodec *encoder = avcodec_find_encoder(get_avcodec_id(dst_codec));
     if(!encoder) { return false; }
-    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 2"
+    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 2";
     _imp->_encoder_ctx.reset(avcodec_alloc_context3(encoder), [](AVCodecContext *ctx) {
         avcodec_free_context(&ctx);
     });
@@ -983,7 +983,7 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
         av_dict_free(&opts);
         return false;
     }
-    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 3"
+    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 3";
     av_dict_free(&opts);
 
     // 【修正4】: 保存frame_size到成员变量
@@ -1005,9 +1005,9 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 
     _imp->_decoder->setOnDecode([this](const FFmpegFrame::Ptr &pcm_frame) {
         auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
-        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 4"
+        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 4";
         if (!resampled_frame) return;
-        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 5"
+        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 5";
         av_audio_fifo_write(_imp->_audio_fifo, (void **)resampled_frame->get()->data, resampled_frame->get()->nb_samples);
 
         while (av_audio_fifo_size(_imp->_audio_fifo) >= _imp->_frame_size) {
