@@ -872,7 +872,7 @@ public:
 
         int ret = avcodec_send_frame(_encoder_ctx.get(), frame_to_encode);
         if (ret < 0) {
-            if (ret != AVERROR_EOF) { WarnL << "avcodec_send_frame failed: " << ffmpeg_err(ret); }
+            if (ret != AVERROR_EOF) { WarnL << ">>>>>>>>>>>>>>>avcodec_send_frame failed: " << ffmpeg_err(ret); }
             return;
         }
 
@@ -880,7 +880,7 @@ public:
             auto pkt = alloc_av_packet();
             ret = avcodec_receive_packet(_encoder_ctx.get(), pkt.get());
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) { break; }
-            if (ret < 0) { WarnL << "FFmpeg encoding failed: " << ffmpeg_err(ret); break; }
+            if (ret < 0) { WarnL << ">>>>>>>>>>>>>>>>>>>>>FFmpeg encoding failed: " << ffmpeg_err(ret); break; }
             
             auto out_dts = av_rescale_q(pkt->dts, _encoder_ctx->time_base, {1, 1000});
             auto out_pts = av_rescale_q(pkt->pts, _encoder_ctx->time_base, {1, 1000});
@@ -1019,21 +1019,29 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 
 
 
-    _imp->_decoder->setOnDecode([this](const FFmpegFrame::Ptr &pcm_frame) {
+    _imp->_decoder->setOnDecode([this, frame_size](const FFmpegFrame::Ptr &pcm_frame) {
         auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
-        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 4";
-        if (!resampled_frame) return;
-        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 5";
+        InfoL << ">>>>>>>>>> 4";
+        if (!resampled_frame) {
+            return;
+        }
+        InfoL << ">>>>>>>>>> 5";
+        // 1. 将重采样后的数据写入FIFO
         av_audio_fifo_write(_imp->_audio_fifo, (void **)resampled_frame->get()->data, resampled_frame->get()->nb_samples);
 
-        while (av_audio_fifo_size(_imp->_audio_fifo) >= _imp->_frame_size) {
-            av_audio_fifo_read(_imp->_audio_fifo, (void **)_imp->_fifo_frame->data, _imp->_frame_size);
+        // 2. 从FIFO中循环读取固定大小的帧进行编码
+        while (av_audio_fifo_size(_imp->_audio_fifo) >= frame_size) {
+            av_audio_fifo_read(_imp->_audio_fifo, (void **)_imp->_fifo_frame->data, frame_size);
             
-            // 【修正1】: 直接使用输出样本数作为PTS
+            // 3. 【最终修正】: 为送入编码器的帧赋予正确的PTS
+            //    因为编码器的 time_base 是 {1, 48000}，所以PTS就应该等于累计的样本数。
             _imp->_fifo_frame->pts = _imp->_total_output_samples;
-            _imp->_total_output_samples += _imp->_fifo_frame->nb_samples;
-
+            
+            // 4. 将这一帧送去编码
             _imp->encode_frame(_imp->_fifo_frame.get());
+            
+            // 5. 更新累计的已输出样本数
+            _imp->_total_output_samples += _imp->_fifo_frame->nb_samples;
         }
     });
 
