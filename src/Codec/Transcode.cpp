@@ -934,20 +934,21 @@ Transcode::~Transcode() {
 }
 
 bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_samplerate, int dst_channels) {
-    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>Transcode::open ";
+    InfoL << ">>>>>>>>>> Transcode::open entered.";
     
-    if (_imp->_decoder) {
-        _imp->_decoder->stopThread(true);
-    }
     auto audio_track = std::dynamic_pointer_cast<AudioTrack>(src_track);
-    if (!audio_track) { return false; }
-    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 1";
+    if (!audio_track) { 
+        WarnL << ">>>>>>>>>> Transcode::open ERROR: Source is not an audio track.";
+        return false; 
+    }
+    
     _imp->_decoder = std::make_shared<FFmpegDecoder>(src_track);
     
     dst_samplerate = 48000;
     dst_channels = audio_track->getAudioChannel();
 
-    // 【修正3】: 统一使用平面格式 S16P
+    InfoL << ">>>>>>>>>> Transcode::open Stage 1: Decoder created. Target format: " << dst_samplerate << "Hz, " << dst_channels << "ch.";
+    
 #if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
     AVChannelLayout ch_layout;
     av_channel_layout_default(&ch_layout, dst_channels);
@@ -959,56 +960,83 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 #endif
 
     const AVCodec *encoder = avcodec_find_encoder(get_avcodec_id(dst_codec));
-    if(!encoder) { return false; }
-    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 2";
+    if(!encoder) { 
+        WarnL << ">>>>>>>>>> Transcode::open ERROR: Opus encoder not found.";
+        return false; 
+    }
+
+    InfoL << ">>>>>>>>>> Transcode::open Stage 2: Swr and Encoder found. Allocating context...";
+    
     _imp->_encoder_ctx.reset(avcodec_alloc_context3(encoder), [](AVCodecContext *ctx) {
-        avcodec_free_context(&ctx);
+        if (ctx) avcodec_free_context(&ctx);
     });
+
+    // ------------------- START OF FINAL CORRECTION -------------------
     
-    // 【修正3】: 统一使用平面格式 S16P
-    _imp->_encoder_ctx->sample_fmt = AV_SAMPLE_FMT_S16P;
-    _imp->_encoder_ctx->sample_rate = dst_samplerate;
-    // 【修正1 & 5】: Opus编码器的时间基就是它的采样率
-    _imp->_encoder_ctx->time_base = {1, dst_samplerate};
-    
+    auto ctx = _imp->_encoder_ctx.get();
+    ctx->sample_fmt = AV_SAMPLE_FMT_S16P;
+    ctx->sample_rate = dst_samplerate;
+    ctx->time_base = {1, dst_samplerate};
+    ctx->bit_rate = 128000;
+
+    // 【最关键的修正】: 使用FFmpeg推荐的、最健壮的方式来设置通道布局
 #if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
-    av_channel_layout_default(&_imp->_encoder_ctx->ch_layout, dst_channels);
+    av_channel_layout_default(&ctx->ch_layout, dst_channels);
 #else
-    _imp->_encoder_ctx->channels = dst_channels;
-    _imp->_encoder_ctx->channel_layout = av_get_default_channel_layout(dst_channels);
+    ctx->channels = dst_channels;
+    ctx->channel_layout = av_get_default_channel_layout(dst_channels);
 #endif
+
+    // Opus编码器可能对特定的通道布局有要求，如果默认的不行，尝试最常见的立体声布局
+    if (dst_channels == 2 && ctx->ch_layout.nb_channels == 0) {
+#if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
+        av_channel_layout_from_string(&ctx->ch_layout, "stereo");
+#else
+        ctx->channel_layout = AV_CH_LAYOUT_STEREO;
+#endif
+    }
     
     AVDictionary *opts = nullptr;
-    if (dst_codec == CodecOpus) {
-        _imp->_encoder_ctx->bit_rate = 128000;
-        av_dict_set(&opts, "application", "audio", 0);
-        av_dict_set(&opts, "vbr", "on", 0);
-    }
+    av_dict_set(&opts, "application", "audio", 0);
+    av_dict_set(&opts, "vbr", "on", 0);
 
-    if (avcodec_open2(_imp->_encoder_ctx.get(), encoder, &opts) < 0) {
-        av_dict_free(&opts);
+    InfoL << ">>>>>>>>>> Transcode::open Stage 2.5: Context configured. Opening codec...";
+
+    int ret = avcodec_open2(ctx, encoder, &opts);
+    av_dict_free(&opts);
+    
+    if (ret < 0) {
+        // 【新增】打印详细的错误信息
+        WarnL << ">>>>>>>>>> Transcode::open ERROR: avcodec_open2 failed with error: " << ffmpeg_err(ret);
         return false;
     }
-    InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 3";
-    av_dict_free(&opts);
-
-    // 【修正4】: 保存frame_size到成员变量
-    _imp->_frame_size = _imp->_encoder_ctx->frame_size ? _imp->_encoder_ctx->frame_size : 960;
     
-    _imp->_audio_fifo = av_audio_fifo_alloc(_imp->_encoder_ctx->sample_fmt, dst_channels, _imp->_frame_size * 4);
+    // -------------------- END OF FINAL CORRECTION --------------------
+    
+    InfoL << ">>>>>>>>>> Transcode::open Stage 3: Codec opened successfully.";
+
+    int frame_size = ctx->frame_size ? ctx->frame_size : 960;
+    _imp->_frame_size = frame_size;
+    
+    _imp->_audio_fifo = av_audio_fifo_alloc(ctx->sample_fmt, dst_channels, frame_size * 4);
     
     _imp->_fifo_frame.reset(av_frame_alloc(), [](AVFrame *ptr){ av_frame_free(&ptr); });
-    _imp->_fifo_frame->nb_samples = _imp->_frame_size;
+    _imp->_fifo_frame->nb_samples = frame_size;
     _imp->_fifo_frame->sample_rate = dst_samplerate;
-    _imp->_fifo_frame->format = _imp->_encoder_ctx->sample_fmt;
+    _imp->_fifo_frame->format = ctx->sample_fmt;
 #if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
-    av_channel_layout_copy(&_imp->_fifo_frame->ch_layout, &_imp->_encoder_ctx->ch_layout);
+    av_channel_layout_copy(&_imp->_fifo_frame->ch_layout, &ctx->ch_layout);
 #else
-    _imp->_fifo_frame->channel_layout = _imp->_encoder_ctx->channel_layout;
-    _imp->_fifo_frame->channels = _imp->_encoder_ctx->channels;
+    _imp->_fifo_frame->channel_layout = ctx->channel_layout;
+    _imp->_fifo_frame->channels = ctx->channels;
 #endif
-    if (av_frame_get_buffer(_imp->_fifo_frame.get(), 0) < 0) { return false; }
+    if (av_frame_get_buffer(_imp->_fifo_frame.get(), 0) < 0) { 
+        WarnL << ">>>>>>>>>> Transcode::open ERROR: Failed to allocate buffer for FIFO frame.";
+        return false; 
+    }
 
+
+    
     _imp->_decoder->setOnDecode([this](const FFmpegFrame::Ptr &pcm_frame) {
         auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
         InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>> 4";

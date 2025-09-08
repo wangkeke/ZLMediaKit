@@ -659,7 +659,7 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
             // 创建转码轨道装饰器
             auto transcoded_track = std::make_shared<AudioTrackMuxer>(audio_track);
             // 建立数据流委托，让原始AAC轨道的数据自动流向我们的转码器
-            // audio_track->addDelegate(transcoded_track);
+            audio_track->addDelegate(transcoded_track);
             // 存储Opus轨道引用，供WebRTC使用
             _opus_track = transcoded_track;
             
@@ -775,10 +775,6 @@ void MultiMediaSourceMuxer::resetTracks() {
 }
 
 bool MultiMediaSourceMuxer::onTrackFrame(const Frame::Ptr &frame_in) {
-    if (_opus_track && frame_in->getCodecId() == CodecAAC) {
-        InfoL << ">>>>>>>>>>>>>>>>>>>>>> Directly sending AAC frame to Opus track...";
-        _opus_track->inputFrame(frame_in);
-    }
     auto frame = frame_in;
     if (_option.modify_stamp != ProtocolOption::kModifyStampOff) {
         // 时间戳不采用原始的绝对时间戳  [AUTO-TRANSLATED:8beb3bf7]
