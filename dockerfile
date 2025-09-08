@@ -27,7 +27,12 @@ RUN apt-get update && \
          libssl-dev \
          gcc \
          g++ \
-         gdb && \
+         gdb \
+         libavcodec-dev \
+         libavformat-dev \
+         libavutil-dev \
+         libswscale-dev \
+         libswresample-dev && \
          apt-get autoremove -y && \
          apt-get clean -y && \
          rm -rf /var/lib/apt/lists/*
@@ -65,6 +70,11 @@ RUN apt-get update && \
          curl \
          libssl-dev \
          ffmpeg \
+         libavcodec58 \
+         libavformat58 \
+         libavutil56 \
+         libswscale5 \
+         libswresample3 \
          gcc \
          g++ \
          gdb && \

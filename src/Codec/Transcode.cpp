@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#if defined(ENABLE_FFMPEG)
 #if !defined(_WIN32)
 #include <dlfcn.h>
 #endif
