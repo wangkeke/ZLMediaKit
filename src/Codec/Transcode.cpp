@@ -949,8 +949,10 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 
     InfoL << ">>>>>>>>>> Transcode::open Stage 1: Decoder created. Target format: " << dst_samplerate << "Hz, " << dst_channels << "ch.";
     
-    // 【最终修正】: 始终使用旧版API，不再需要 #if ... #endif
-    _imp->_swr = std::make_shared<FFmpegSwr>(AV_SAMPLE_FMT_S16P, dst_channels,
+    // =================== START OF FINAL PARAMETER CORRECTION ===================
+
+    // 【最终修正1】: 将重采样器的目标格式改为 AV_SAMPLE_FMT_S16 (交错格式)
+    _imp->_swr = std::make_shared<FFmpegSwr>(AV_SAMPLE_FMT_S16, dst_channels,
                                        av_get_default_channel_layout(dst_channels), dst_samplerate);
 
     const AVCodec *encoder = avcodec_find_encoder(get_avcodec_id(dst_codec));
@@ -966,15 +968,22 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
     });
 
     auto ctx = _imp->_encoder_ctx.get();
-    ctx->sample_fmt = AV_SAMPLE_FMT_S16P;
+    
+    // 【最终修正2】: 为编码器设置最标准的Opus参数
+    ctx->sample_fmt = AV_SAMPLE_FMT_S16; // 使用交错格式
     ctx->sample_rate = dst_samplerate;
     ctx->time_base = {1, dst_samplerate};
     ctx->bit_rate = 128000;
-
-    // 【最终修正】: 始终使用旧版API
     ctx->channels = dst_channels;
     ctx->channel_layout = av_get_default_channel_layout(dst_channels);
+
+    // 对于双声道，明确指定为立体声布局
+    if (dst_channels == 2) {
+        ctx->channel_layout = AV_CH_LAYOUT_STEREO;
+    }
     
+    // =================== END OF FINAL PARAMETER CORRECTION ===================
+
     AVDictionary *opts = nullptr;
     av_dict_set(&opts, "application", "audio", 0);
     av_dict_set(&opts, "vbr", "on", 0);
@@ -994,15 +1003,12 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
     int frame_size = ctx->frame_size ? ctx->frame_size : 960;
     _imp->_frame_size = frame_size;
     
-    // 【最终修正】: 始终使用旧版API
     _imp->_audio_fifo = av_audio_fifo_alloc(ctx->sample_fmt, ctx->channels, frame_size * 4);
     
     _imp->_fifo_frame.reset(av_frame_alloc(), [](AVFrame *ptr){ av_frame_free(&ptr); });
     _imp->_fifo_frame->nb_samples = frame_size;
     _imp->_fifo_frame->sample_rate = dst_samplerate;
     _imp->_fifo_frame->format = ctx->sample_fmt;
-    
-    // 【最终修正】: 始终使用旧版API
     _imp->_fifo_frame->channel_layout = ctx->channel_layout;
     _imp->_fifo_frame->channels = ctx->channels;
     
