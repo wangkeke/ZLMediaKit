@@ -905,7 +905,11 @@ public:
             
             // 【修正3】: 使用安全的静音填充
             if (read_samples < _frame_size) {
+#if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
                 av_samples_set_silence(_fifo_frame->data, read_samples, _frame_size - read_samples, _fifo_frame->ch_layout.nb_channels, (AVSampleFormat)_fifo_frame->format);
+#else
+                av_samples_set_silence(_fifo_frame->data, read_samples, _frame_size - read_samples, _fifo_frame->channels, (AVSampleFormat)_fifo_frame->format);
+#endif
             }
             
             _fifo_frame->nb_samples = _frame_size;
@@ -919,7 +923,9 @@ public:
     }
 };
 
-Transcode::Transcode() : _imp(std::make_unique<Imp>()) {}
+Transcode::Transcode() {
+    _imp.reset(new Imp());
+}
 
 Transcode::~Transcode() {
     if (_imp) {
