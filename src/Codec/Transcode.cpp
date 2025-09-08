@@ -884,6 +884,9 @@ public:
             
             auto out_dts = av_rescale_q(pkt->dts, _encoder_ctx->time_base, {1, 1000});
             auto out_pts = av_rescale_q(pkt->pts, _encoder_ctx->time_base, {1, 1000});
+            
+            InfoL << ">>>>>>>>>>>>>>>>>>>>>>Transcode::encode_frame: Generated Opus frame, size=" << pkt->size 
+                << ", dts=" << out_dts << ", pts=" << out_pts;
 
             auto frame = std::make_shared<FrameFromPtr>(get_codec_id(_encoder_ctx->codec_id), (char*)pkt->data, pkt->size, out_dts, out_pts);
             if (_on_frame) {
@@ -1020,6 +1023,41 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
 
 
     _imp->_decoder->setOnDecode([this, frame_size](const FFmpegFrame::Ptr &pcm_frame) {
+        
+                // --- START OF FORENSIC PROBE 2: DECODED PCM ---
+        
+        // 【探针 B】: 打印解码后PCM帧的详细信息
+        static bool pcm_info_printed = false;
+        if (!pcm_info_printed) {
+            auto frame = pcm_frame->get();
+            _StrPrinter printer;
+            printer << "\n>>>>>>>>>>>>>>>>>>>>>>> DECODED PCM FRAME INFO (Probe B) <<<<<<<<<<\n";
+            printer << "           |-> Sample Rate: " << frame->sample_rate << "\n";
+            printer << "           |-> Channels: " << frame->channels << "\n";
+            printer << "           |-> Format: " << av_get_sample_fmt_name((AVSampleFormat)frame->format) << "\n";
+            printer << "           |-> Samples per frame: " << frame->nb_samples << "\n";
+            printer << "           |-> Linesize[0]: " << frame->linesize[0];
+            InfoL << printer;
+            pcm_info_printed = true;
+        }
+
+        // 【探针 C】: 导出解码后的原始PCM数据
+        try {
+            std::ofstream pcm_dump_file("./zlmediakit_decoded_pcm.raw", std::ios::binary | std::ios::app);
+            if (pcm_dump_file) {
+                pcm_dump_file.write((char*)pcm_frame->get()->data[0], pcm_frame->get()->linesize[0]);
+                pcm_dump_file.flush(); 
+            }
+        } catch(const std::exception &ex) {
+            WarnL << ">>>>>>>>>>>>>>>>>>>>>>>>>Exception while writing to decoded_pcm.raw: " << ex.what();
+        }
+
+        // --- END OF FORENSIC PROBE 2 ---
+        
+        // 【重要】: 暂时禁用后续所有流程，只验证解码
+        return; 
+
+        /*
         auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
         InfoL << ">>>>>>>>>> 4";
         if (!resampled_frame) {
@@ -1043,12 +1081,32 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
             // 5. 更新累计的已输出样本数
             _imp->_total_output_samples += _imp->_fifo_frame->nb_samples;
         }
+        */
     });
 
     return true;
 }
 
 void Transcode::inputFrame(const Frame::Ptr &frame) {
+    // --- START OF FORENSIC PROBE 1: ORIGINAL AAC ---
+    
+    // 【探针 A】: 保存输入到解码器的原始AAC Frame
+    if (frame && frame->getCodecId() == CodecAAC) {
+        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>保存输入到解码器的原始AAC Frame";
+        try {
+            std::ofstream aac_dump_file("./zlmediakit_original_aac.raw", std::ios::binary | std::ios::app);
+            if (aac_dump_file) {
+                // AAC数据通常没有前缀，直接写入裸数据
+                aac_dump_file.write(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
+                aac_dump_file.flush();
+            }
+        } catch(const std::exception &ex) {
+            WarnL << "Exception while writing to original_aac.raw: " << ex.what();
+        }
+    }
+    
+    // --- END OF FORENSIC PROBE 1 ---
+    
     if (_imp && _imp->_decoder) {
         _imp->_decoder->inputFrame(frame, false, false);
     }

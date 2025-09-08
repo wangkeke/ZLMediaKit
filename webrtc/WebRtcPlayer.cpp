@@ -223,6 +223,12 @@ void WebRtcPlayer::onStartWebRTC() {
 
             size_t i = 0;
             pkt->for_each([&](const RtpPacket::Ptr &rtp) {
+                // 添加音频帧检测日志
+                if (rtp->type == TrackAudio) {
+                    InfoL << "WebRtcPlayer: Receiving audio RTP packet, seq=" << rtp->getSeq() 
+                        << ", stamp=" << rtp->getStamp() << ", size=" << rtp->getPayloadSize()
+                        << ", is_opus=" << (rtp->getCodecId() == CodecOpus ? "true" : "false");
+                }
                 if (strong_self->_bfliter_flag) {
                     if (TrackVideo == rtp->type && strong_self->_is_h264) {
                         auto rtp_filter = strong_self->_bfilter->processPacket(rtp);
@@ -306,7 +312,7 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
             configure.audio.preferred_codec.clear();
             configure.audio.preferred_codec.emplace_back(CodecOpus);
             has_audio = true;
-            InfoL << ">>>>>>>>>>>>>>>>Using dedicated Opus track for WebRTC";
+            InfoL << ">>>>>>>>>>>>>>>>Using dedicated Opus track for WebRTC, codec=" << opus_track->getCodecName();
         } 
     }
 
@@ -318,6 +324,7 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
                     configure.audio.preferred_codec.clear();
                     configure.audio.preferred_codec.emplace_back(CodecOpus);
                     has_audio = true;
+                    InfoL << ">>>>>>>>>>>>>>>>Using Opus track from source tracks";
                     // 找到最优的Opus后，就不再关心其他音频轨道了
                     break; 
                 }
@@ -335,15 +342,18 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
             // 如果上面没有找到Opus，这里可以配置一个备用的音频编码
             has_audio = true;
             configure.audio.preferred_codec.emplace_back(track->getCodecId());
+            InfoL << ">>>>>>>>>>>>>>>>Using fallback audio codec: " << track->getCodecName();
         }
     }
 
     // 如果遍历后发现根本没有音频或视频轨道，则将其设置为 inactive
     if (!has_audio) {
         configure.audio.direction = RtpDirection::inactive;
+        InfoL << ">>>>>>>>>>>>>>>>No audio track found, setting audio to inactive";
     }
     if (!has_video) {
         configure.video.direction = RtpDirection::inactive;
+        InfoL << ">>>>>>>>>>>>>>>>No video track found, setting video to inactive";
     }
 
     // 【关键】不再调用 configure.setPlayRtspInfo()，因为它只会读取旧的静态SDP。
