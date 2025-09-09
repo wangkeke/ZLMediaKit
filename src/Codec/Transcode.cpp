@@ -16,6 +16,7 @@
 #include "Util/uv_errno.h"
 #include "Transcode.h"
 #include "Common/config.h"
+#include "Extension/Factory.h"
 #include "Common/Stamp.h"  // 添加Stamp头文件包含
 #include <fstream>
 #include <deque>
@@ -468,6 +469,24 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
         av_dict_set(&dict, "zerolatency", "1", 0);
         av_dict_set(&dict, "strict", "-2", 0);
 
+        // =================== START OF FINAL CORRECTION ===================
+        // 【关键修正】: 为解码器提供 extradata (Audio Specific Config)
+        if (track->getCodecId() == CodecAAC) {
+            auto aac_track = std::dynamic_pointer_cast<AudioTrack>(track);
+            if (aac_track) {
+                auto extra_data = aac_track->getExtraData();
+                if (extra_data && extra_data->size()) {
+                    _context->extradata = (uint8_t*)av_malloc(extra_data->size() + AV_INPUT_BUFFER_PADDING_SIZE);
+                    if (_context->extradata) {
+                        _context->extradata_size = extra_data->size();
+                        memcpy(_context->extradata, extra_data->data(), extra_data->size());
+                        InfoL << "FFmpegDecoder: Applied AAC extradata, size=" << extra_data->size();
+                    }
+                }
+            }
+        }
+        // ==================== END OF FINAL CORRECTION ====================
+
 #ifdef AV_CODEC_CAP_TRUNCATED
         if (codec->capabilities & AV_CODEC_CAP_TRUNCATED) {
             /* we do not send complete frames */
@@ -851,11 +870,12 @@ public:
     std::shared_ptr<AVCodecContext> _encoder_ctx;
     on_transcoded_frame _on_frame;
     
-    // 【修正4】: 添加frame_size成员
-    int _frame_size = 0;
+    // 【采纳建议】: 并发初始化保护
+    std::once_flag _init_flag;
+    std::atomic<bool> _inited{false}; // 使用原子变量保证线程安全
     
-    // 【修正1】: 时间戳管理，只在输出域工作
     int64_t _total_output_samples = 0;
+    int _frame_size = 0;
     
     AVAudioFifo *_audio_fifo = nullptr;
     std::shared_ptr<AVFrame> _fifo_frame;
@@ -866,13 +886,12 @@ public:
         }
     }
     
-    // 【修正2】: 统一函数签名
     void encode_frame(AVFrame *frame_to_encode) {
         if (!_encoder_ctx) return;
 
         int ret = avcodec_send_frame(_encoder_ctx.get(), frame_to_encode);
         if (ret < 0) {
-            if (ret != AVERROR_EOF) { WarnL << ">>>>>>>>>>>>>>>avcodec_send_frame failed: " << ffmpeg_err(ret); }
+            if (ret != AVERROR_EOF) { WarnL << "avcodec_send_frame failed: " << ffmpeg_err(ret); }
             return;
         }
 
@@ -880,13 +899,10 @@ public:
             auto pkt = alloc_av_packet();
             ret = avcodec_receive_packet(_encoder_ctx.get(), pkt.get());
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) { break; }
-            if (ret < 0) { WarnL << ">>>>>>>>>>>>>>>>>>>>>FFmpeg encoding failed: " << ffmpeg_err(ret); break; }
+            if (ret < 0) { WarnL << "avcodec_receive_packet failed: " << ffmpeg_err(ret); break; }
             
             auto out_dts = av_rescale_q(pkt->dts, _encoder_ctx->time_base, {1, 1000});
             auto out_pts = av_rescale_q(pkt->pts, _encoder_ctx->time_base, {1, 1000});
-            
-            InfoL << ">>>>>>>>>>>>>>>>>>>>>>Transcode::encode_frame: Generated Opus frame, size=" << pkt->size 
-                << ", dts=" << out_dts << ", pts=" << out_pts;
 
             auto frame = std::make_shared<FrameFromPtr>(get_codec_id(_encoder_ctx->codec_id), (char*)pkt->data, pkt->size, out_dts, out_pts);
             if (_on_frame) {
@@ -898,28 +914,22 @@ public:
     void flush_fifo() {
         if (!_audio_fifo || !_encoder_ctx || !_fifo_frame) return;
         
-        while (av_audio_fifo_size(_audio_fifo) > 0) {
-            int available_samples = av_audio_fifo_size(_audio_fifo);
-            int read_samples = (std::min)(available_samples, _frame_size);
-
+        int available_samples = av_audio_fifo_size(_audio_fifo);
+        if (available_samples > 0) {
             av_frame_make_writable(_fifo_frame.get());
+            av_audio_fifo_read(_audio_fifo, (void **)_fifo_frame->data, available_samples);
             
-            av_audio_fifo_read(_audio_fifo, (void **)_fifo_frame->data, read_samples);
-            
-            // 【修正3】: 使用安全的静音填充
-            if (read_samples < _frame_size) {
+            // 【采纳建议3】: 使用安全的静音填充
+            if (available_samples < _frame_size) {
 #if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
-                av_samples_set_silence(_fifo_frame->data, read_samples, _frame_size - read_samples, _fifo_frame->ch_layout.nb_channels, (AVSampleFormat)_fifo_frame->format);
+                 av_samples_set_silence(&_fifo_frame->data[0], available_samples, _frame_size - available_samples, _fifo_frame->ch_layout.nb_channels, (AVSampleFormat)_fifo_frame->format);
 #else
-                av_samples_set_silence(_fifo_frame->data, read_samples, _frame_size - read_samples, _fifo_frame->channels, (AVSampleFormat)_fifo_frame->format);
+                 av_samples_set_silence(&_fifo_frame->data[0], available_samples, _frame_size - available_samples, _fifo_frame->channels, (AVSampleFormat)_fifo_frame->format);
 #endif
             }
             
             _fifo_frame->nb_samples = _frame_size;
-            
-            // 【修正1】: 直接使用输出样本数作为PTS
             _fifo_frame->pts = _total_output_samples;
-            _total_output_samples += _fifo_frame->nb_samples;
             
             encode_frame(_fifo_frame.get());
         }
@@ -937,176 +947,162 @@ Transcode::~Transcode() {
 }
 
 bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_samplerate, int dst_channels) {
-    InfoL << ">>>>>>>>>> Transcode::open entered.";
-    
     auto audio_track = std::dynamic_pointer_cast<AudioTrack>(src_track);
     if (!audio_track) { 
-        WarnL << ">>>>>>>>>> Transcode::open ERROR: Source is not an audio track.";
         return false; 
     }
     
     _imp->_decoder = std::make_shared<FFmpegDecoder>(src_track);
-    
-    dst_samplerate = 48000;
-    dst_channels = audio_track->getAudioChannel();
 
-    InfoL << ">>>>>>>>>> Transcode::open Stage 1: Decoder created. Target format: " << dst_samplerate << "Hz, " << dst_channels << "ch.";
-    
-    // =================== START OF FINAL PARAMETER CORRECTION ===================
-
-    // 【最终修正1】: 将重采样器的目标格式改为 AV_SAMPLE_FMT_S16 (交错格式)
-    _imp->_swr = std::make_shared<FFmpegSwr>(AV_SAMPLE_FMT_S16, dst_channels,
-                                       av_get_default_channel_layout(dst_channels), dst_samplerate);
-
-    const AVCodec *encoder = avcodec_find_encoder(get_avcodec_id(dst_codec));
-    if(!encoder) { 
-        WarnL << ">>>>>>>>>> Transcode::open ERROR: Opus encoder not found.";
-        return false; 
-    }
-
-    InfoL << ">>>>>>>>>> Transcode::open Stage 2: Swr and Encoder found. Allocating context...";
-    
-    _imp->_encoder_ctx.reset(avcodec_alloc_context3(encoder), [](AVCodecContext *ctx) {
-        if (ctx) avcodec_free_context(&ctx);
-    });
-
-    auto ctx = _imp->_encoder_ctx.get();
-    
-    // 【最终修正2】: 为编码器设置最标准的Opus参数
-    ctx->sample_fmt = AV_SAMPLE_FMT_S16; // 使用交错格式
-    ctx->sample_rate = dst_samplerate;
-    ctx->time_base = {1, dst_samplerate};
-    ctx->bit_rate = 128000;
-    ctx->channels = dst_channels;
-    ctx->channel_layout = av_get_default_channel_layout(dst_channels);
-
-    // 对于双声道，明确指定为立体声布局
-    if (dst_channels == 2) {
-        ctx->channel_layout = AV_CH_LAYOUT_STEREO;
-    }
-    
-    // =================== END OF FINAL PARAMETER CORRECTION ===================
-
-    AVDictionary *opts = nullptr;
-    av_dict_set(&opts, "application", "audio", 0);
-    av_dict_set(&opts, "vbr", "on", 0);
-
-    InfoL << ">>>>>>>>>> Transcode::open Stage 2.5: Context configured. Opening codec...";
-
-    int ret = avcodec_open2(ctx, encoder, &opts);
-    av_dict_free(&opts);
-    
-    if (ret < 0) {
-        WarnL << ">>>>>>>>>> Transcode::open ERROR: avcodec_open2 failed with error: " << ffmpeg_err(ret);
-        return false;
-    }
-    
-    InfoL << ">>>>>>>>>> Transcode::open Stage 3: Codec opened successfully.";
-
-    int frame_size = ctx->frame_size ? ctx->frame_size : 960;
-    _imp->_frame_size = frame_size;
-    
-    _imp->_audio_fifo = av_audio_fifo_alloc(ctx->sample_fmt, ctx->channels, frame_size * 4);
-    
-    _imp->_fifo_frame.reset(av_frame_alloc(), [](AVFrame *ptr){ av_frame_free(&ptr); });
-    _imp->_fifo_frame->nb_samples = frame_size;
-    _imp->_fifo_frame->sample_rate = dst_samplerate;
-    _imp->_fifo_frame->format = ctx->sample_fmt;
-    _imp->_fifo_frame->channel_layout = ctx->channel_layout;
-    _imp->_fifo_frame->channels = ctx->channels;
-    
-    if (av_frame_get_buffer(_imp->_fifo_frame.get(), 0) < 0) { 
-        WarnL << ">>>>>>>>>> Transcode::open ERROR: Failed to allocate buffer for FIFO frame.";
-        return false; 
-    }
-
-
-
-    _imp->_decoder->setOnDecode([this, frame_size](const FFmpegFrame::Ptr &pcm_frame) {
-        
-                // --- START OF FORENSIC PROBE 2: DECODED PCM ---
-        
-        // 【探针 B】: 打印解码后PCM帧的详细信息
-        static bool pcm_info_printed = false;
-        if (!pcm_info_printed) {
-            auto frame = pcm_frame->get();
-            _StrPrinter printer;
-            printer << "\n>>>>>>>>>>>>>>>>>>>>>>> DECODED PCM FRAME INFO (Probe B) <<<<<<<<<<\n";
-            printer << "           |-> Sample Rate: " << frame->sample_rate << "\n";
-            printer << "           |-> Channels: " << frame->channels << "\n";
-            printer << "           |-> Format: " << av_get_sample_fmt_name((AVSampleFormat)frame->format) << "\n";
-            printer << "           |-> Samples per frame: " << frame->nb_samples << "\n";
-            printer << "           |-> Linesize[0]: " << frame->linesize[0];
-            InfoL << printer;
-            pcm_info_printed = true;
-        }
-
-        // 【探针 C】: 导出解码后的原始PCM数据
-        try {
-            std::ofstream pcm_dump_file("./zlmediakit_decoded_pcm.raw", std::ios::binary | std::ios::app);
-            if (pcm_dump_file) {
-                pcm_dump_file.write((char*)pcm_frame->get()->data[0], pcm_frame->get()->linesize[0]);
-                pcm_dump_file.flush(); 
+    _imp->_decoder->setOnDecode([this, dst_codec](const FFmpegFrame::Ptr &pcm_frame) {
+        // 第一次到达才做初始化（线程安全）
+        std::call_once(_imp->_init_flag, [this, pcm_frame, dst_codec]() {
+            auto decoded_frame = pcm_frame->get();
+            int target_channels = decoded_frame->channels;
+            int target_samplerate = 48000;
+            AVSampleFormat target_fmt = AV_SAMPLE_FMT_S16;
+            
+            // 1b. 创建并配置编码器
+            const AVCodec *encoder = avcodec_find_encoder(get_avcodec_id(dst_codec));
+            if (!encoder) {
+                WarnL << ">>>>>>>>>>>>>>>>>>>>>>>>>>>>encoder not found";
+                return;
             }
-        } catch(const std::exception &ex) {
-            WarnL << ">>>>>>>>>>>>>>>>>>>>>>>>>Exception while writing to decoded_pcm.raw: " << ex.what();
+        // 选择 sample_fmt（优先交错 S16）
+        AVSampleFormat chosen_fmt = AV_SAMPLE_FMT_NONE;
+        if (encoder->sample_fmts) {
+            for (const enum AVSampleFormat *p = encoder->sample_fmts; *p != AV_SAMPLE_FMT_NONE; ++p) {
+                if (*p == AV_SAMPLE_FMT_S16) { chosen_fmt = AV_SAMPLE_FMT_S16; break; }
+                if (chosen_fmt == AV_SAMPLE_FMT_NONE && *p == AV_SAMPLE_FMT_S16P) chosen_fmt = AV_SAMPLE_FMT_S16P;
+            }
+            if (chosen_fmt == AV_SAMPLE_FMT_NONE) chosen_fmt = encoder->sample_fmts[0];
+        } else {
+            chosen_fmt = AV_SAMPLE_FMT_S16;
         }
 
-        // --- END OF FORENSIC PROBE 2 ---
-        
-        // 【重要】: 暂时禁用后续所有流程，只验证解码
-        return; 
+        // 选择 samplerate（优先 48000）
+        int chosen_rate = 48000;
+        if (encoder->supported_samplerates) {
+            bool ok = false;
+            for (int i = 0; encoder->supported_samplerates[i]; ++i) {
+                if (encoder->supported_samplerates[i] == chosen_rate) { ok = true; break; }
+            }
+            if (!ok) chosen_rate = encoder->supported_samplerates ? encoder->supported_samplerates[0] : chosen_rate;
+        }
 
-        /*
-        auto resampled_frame = _imp->_swr->inputFrame(pcm_frame);
-        InfoL << ">>>>>>>>>> 4";
-        if (!resampled_frame) {
+#if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
+        // 构造目标 channel layout
+        AVChannelLayout dst_ch_layout;
+        av_channel_layout_default(&dst_ch_layout, target_channels);
+
+        // 用 chosen_fmt/ch_layout/chosen_rate 构造 FFmpegSwr（你的封装会在 inputFrame 时用源参数初始化 swr ctx）
+        _imp->_swr = std::make_shared<FFmpegSwr>(chosen_fmt, &dst_ch_layout, chosen_rate);
+
+        // dst_ch_layout 已被复制到 _swr 内部，可以安全 uninit 本地变量
+        av_channel_layout_uninit(&dst_ch_layout);
+#else
+        _imp->_swr = std::make_shared<FFmpegSwr>(chosen_fmt, target_channels,
+                    av_get_default_channel_layout(target_channels), chosen_rate);
+#endif
+
+        // 创建 encoder ctx
+        _imp->_encoder_ctx.reset(avcodec_alloc_context3(encoder), [](AVCodecContext *ctx){ avcodec_free_context(&ctx); });
+        auto ctx = _imp->_encoder_ctx.get();
+        ctx->sample_fmt = chosen_fmt;
+        ctx->sample_rate = chosen_rate;
+        ctx->time_base = AVRational{1, ctx->sample_rate};
+        ctx->bit_rate = 128000;
+
+#if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
+        // 设置 channel layout 并确保 ctx->channels 与之匹配
+        av_channel_layout_default(&ctx->ch_layout, target_channels);
+        ctx->channels = av_channel_layout_nb_channels(&ctx->ch_layout);
+#else
+        ctx->channels = target_channels;
+        ctx->channel_layout = av_get_default_channel_layout(target_channels);
+#endif
+
+        AVDictionary *opts = nullptr;
+        av_dict_set(&opts, "application", "audio", 0);
+        av_dict_set(&opts, "vbr", "on", 0);
+        if (avcodec_open2(ctx, encoder, &opts) < 0) {
+            av_dict_free(&opts);
+            WarnL << "avcodec_open2 failed";
+            _imp->_encoder_ctx = nullptr;
             return;
         }
-        InfoL << ">>>>>>>>>> 5";
-        // 1. 将重采样后的数据写入FIFO
-        av_audio_fifo_write(_imp->_audio_fifo, (void **)resampled_frame->get()->data, resampled_frame->get()->nb_samples);
+        av_dict_free(&opts);
 
-        // 2. 从FIFO中循环读取固定大小的帧进行编码
-        while (av_audio_fifo_size(_imp->_audio_fifo) >= frame_size) {
-            av_audio_fifo_read(_imp->_audio_fifo, (void **)_imp->_fifo_frame->data, frame_size);
-            
-            // 3. 【最终修正】: 为送入编码器的帧赋予正确的PTS
-            //    因为编码器的 time_base 是 {1, 48000}，所以PTS就应该等于累计的样本数。
-            _imp->_fifo_frame->pts = _imp->_total_output_samples;
-            
-            // 4. 将这一帧送去编码
-            _imp->encode_frame(_imp->_fifo_frame.get());
-            
-            // 5. 更新累计的已输出样本数
-            _imp->_total_output_samples += _imp->_fifo_frame->nb_samples;
+        // FIFO & fifo_frame
+        _imp->_frame_size = ctx->frame_size ? ctx->frame_size : 960;
+        _imp->_audio_fifo = av_audio_fifo_alloc(ctx->sample_fmt, ctx->channels, _imp->_frame_size * 4);
+        if (!_imp->_audio_fifo) {
+            WarnL << "av_audio_fifo_alloc failed";
+            _imp->_encoder_ctx = nullptr;
+            return;
         }
-        */
+
+        _imp->_fifo_frame.reset(av_frame_alloc(), [](AVFrame *ptr){ av_frame_free(&ptr); });
+        _imp->_fifo_frame->nb_samples = _imp->_frame_size;
+        _imp->_fifo_frame->format = ctx->sample_fmt;
+        _imp->_fifo_frame->sample_rate = ctx->sample_rate;
+#if LIBAVCODEC_VERSION_INT >= FF_CODEC_VER_7_1
+        av_channel_layout_copy(&_imp->_fifo_frame->ch_layout, &ctx->ch_layout);
+#else
+        _imp->_fifo_frame->channels = ctx->channels;
+        _imp->_fifo_frame->channel_layout = ctx->channel_layout;
+#endif
+        if (av_frame_get_buffer(_imp->_fifo_frame.get(), 0) < 0) {
+            WarnL << "av_frame_get_buffer failed";
+            _imp->_encoder_ctx = nullptr;
+            return;
+        }
+
+        _imp->_inited = true;
+        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>Transcoder initialized successfully.";
+        }); // call_once
+
+        // 如果还没初始化成功，直接返回（等待下一个解码帧触发）
+        if (!_imp->_inited) return;
+
+        // ---- 现在处理本帧：先进行重采样 ----
+        auto resampled = _imp->_swr->inputFrame(pcm_frame);
+        if (!resampled) return;
+
+        // 调试写文件：使用 resampled（注意变量名）
+        try {
+            AVFrame *rf = resampled->get();
+            int bytes = av_samples_get_buffer_size(nullptr, rf->channels, rf->nb_samples, (AVSampleFormat)rf->format, 1);
+            if (bytes > 0 && rf->data[0]) {
+                std::ofstream pcm_dump_file("./zlmediakit_resampled_pcm.raw", std::ios::binary | std::ios::app);
+                pcm_dump_file.write((char*)rf->data[0], bytes);
+                pcm_dump_file.flush();
+            }
+        } catch (...) {
+            WarnL << ">>>>>>>>>>>>>>>>>>>>>>>>>>>write pcm debug failed";
+        }
+
+        // 写入 FIFO（resampled->get()->data 必须与 ctx->sample_fmt 匹配）
+        int wrote = av_audio_fifo_write(_imp->_audio_fifo, (void**)resampled->get()->data, resampled->get()->nb_samples);
+        if (wrote <= 0) {
+            WarnL << ">>>>>>>>>>>>>>>>>av_audio_fifo_write failed/wrote= " << wrote;
+            return;
+        }
+
+        while (av_audio_fifo_size(_imp->_audio_fifo) >= _imp->_frame_size) {
+            av_audio_fifo_read(_imp->_audio_fifo, (void**)_imp->_fifo_frame->data, _imp->_frame_size);
+            _imp->_fifo_frame->nb_samples = _imp->_frame_size;
+            _imp->_fifo_frame->pts = _imp->_total_output_samples;
+            _imp->_total_output_samples += _imp->_fifo_frame->nb_samples;
+            _imp->encode_frame(_imp->_fifo_frame.get());
+        }
     });
+
 
     return true;
 }
 
 void Transcode::inputFrame(const Frame::Ptr &frame) {
-    // --- START OF FORENSIC PROBE 1: ORIGINAL AAC ---
-    
-    // 【探针 A】: 保存输入到解码器的原始AAC Frame
-    if (frame && frame->getCodecId() == CodecAAC) {
-        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>>保存输入到解码器的原始AAC Frame";
-        try {
-            std::ofstream aac_dump_file("./zlmediakit_original_aac.raw", std::ios::binary | std::ios::app);
-            if (aac_dump_file) {
-                // AAC数据通常没有前缀，直接写入裸数据
-                aac_dump_file.write(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
-                aac_dump_file.flush();
-            }
-        } catch(const std::exception &ex) {
-            WarnL << "Exception while writing to original_aac.raw: " << ex.what();
-        }
-    }
-    
-    // --- END OF FORENSIC PROBE 1 ---
-    
     if (_imp && _imp->_decoder) {
         _imp->_decoder->inputFrame(frame, false, false);
     }

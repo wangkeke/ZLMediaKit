@@ -201,7 +201,21 @@ void WebRtcPlayer::onStartWebRTC() {
     WebRtcTransportImp::onStartWebRTC();
     if (canSendRtp()) {
         playSrc->pause(false);
-        _reader = playSrc->getRing()->attach(getPoller(), true);
+
+        // 检查是否有Opus轨道，如果有则从Opus轨道读取数据，否则从原始RTSP源读取数据
+        auto muxer = playSrc->getMuxer();
+        auto opus_track = muxer ? muxer->getOpusTrack() : nullptr;
+        
+        if (opus_track) {
+            // 从Opus轨道的RingBuffer中读取数据
+            _reader = opus_track->getRing()->attach(getPoller(), true);
+            InfoL << ">>>>>>>>>>>>>>>>>>WebRtcPlayer: Using Opus track ring buffer for audio data";
+        } else {
+            // 从原始RTSP源的RingBuffer中读取数据
+            _reader = playSrc->getRing()->attach(getPoller(), true);
+            InfoL << ">>>>>>>>>>>>>>>>>>WebRtcPlayer: Using original RTSP source ring buffer for audio data";
+        }
+
         weak_ptr<WebRtcPlayer> weak_self = static_pointer_cast<WebRtcPlayer>(shared_from_this());
         weak_ptr<Session> weak_session = static_pointer_cast<Session>(getSession());
         _reader->setGetInfoCB([weak_session]() {
@@ -226,8 +240,7 @@ void WebRtcPlayer::onStartWebRTC() {
                 // 添加音频帧检测日志
                 if (rtp->type == TrackAudio) {
                     InfoL << "WebRtcPlayer: Receiving audio RTP packet, seq=" << rtp->getSeq() 
-                        << ", stamp=" << rtp->getStamp() << ", size=" << rtp->getPayloadSize()
-                        << ", is_opus=" << (rtp->getCodecId() == CodecOpus ? "true" : "false");
+                        << ", stamp=" << rtp->getStamp() << ", size=" << rtp->getPayloadSize();
                 }
                 if (strong_self->_bfliter_flag) {
                     if (TrackVideo == rtp->type && strong_self->_is_h264) {

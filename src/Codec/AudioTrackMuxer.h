@@ -2,6 +2,8 @@
 #define ZLMEDIAKIT_AUDIOTRACKMUXER_H
 
 #include "Extension/Track.h" // AudioTrackImp 定义在这里
+#include "Util/RingBuffer.h" // 包含RingBuffer
+#include "Rtsp/RtpCodec.h"   // 包含RtpPacket
 
 #ifdef ENABLE_FFMPEG
 // 【关键】使用前向声明，而不是包含完整的 "Transcode.h"
@@ -21,6 +23,7 @@ namespace mediakit {
 class AudioTrackMuxer : public AudioTrackImp {
 public:
     using Ptr = std::shared_ptr<AudioTrackMuxer>;
+    using RingBufferType = toolkit::RingBuffer<std::shared_ptr<toolkit::List<RtpPacket::Ptr>>>;
 
     /**
      * 构造函数
@@ -42,12 +45,17 @@ public:
      */
     Track::Ptr clone() const override;
 
+    // 【关键】: 提供访问其内部RingBuffer的方法
+    const RingBufferType::Ptr& getRing() const;
+
 private:
     AudioTrack::Ptr _origin_track;
+    RingBufferType::Ptr _ring; // 【关键】: 拥有自己的RingBuffer
 #ifdef ENABLE_FFMPEG
     // 编译器在这里只需要知道 Transcode 是一个类型就足够了，
     // 因为我们只声明了一个智能指针，并没有访问它的任何成员
     std::shared_ptr<Transcode> _transcode;
+    RtpCodec::Ptr _rtp_encoder; // 用于将Opus Frame打包成RTP
 #endif
 };
 
