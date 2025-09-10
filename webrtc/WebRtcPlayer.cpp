@@ -202,28 +202,69 @@ void WebRtcPlayer::onStartWebRTC() {
     if (canSendRtp()) {
         playSrc->pause(false);
 
-        // 检查是否有Opus轨道，如果有则从Opus轨道读取数据，否则从原始RTSP源读取数据
+        // 检查是否有Opus轨道，如果有则从Opus轨道读取音频数据，从原始RTSP源读取视频数据
         auto muxer = playSrc->getMuxer();
         auto opus_track = muxer ? muxer->getOpusTrack() : nullptr;
         
+        // 创建原始RTSP源的读取器来处理视频数据
+        auto rtsp_reader = playSrc->getRing()->attach(getPoller(), true);
+        
         if (opus_track) {
-            // 从Opus轨道的RingBuffer中读取数据
-            _reader = opus_track->getRing()->attach(getPoller(), true);
-            InfoL << ">>>>>>>>>>>>>>>>>>WebRtcPlayer: Using Opus track ring buffer for audio data";
+            // 创建Opus轨道的读取器来处理音频数据
+            _audio_reader = opus_track->getRing()->attach(getPoller(), true);
+            // InfoL << ">>>>>>>>>>>>>>>>>>WebRtcPlayer: Using Opus track ring buffer for audio data";
+            
+            // 设置Opus读取器的回调
+            weak_ptr<WebRtcPlayer> weak_self = static_pointer_cast<WebRtcPlayer>(shared_from_this());
+            weak_ptr<Session> weak_session = static_pointer_cast<Session>(getSession());
+            
+            _audio_reader->setGetInfoCB([weak_session]() {
+                Any ret;
+                ret.set(static_pointer_cast<Session>(weak_session.lock()));
+                return ret;
+            });
+            
+            _audio_reader->setReadCB([weak_self](const RtspMediaSource::RingDataType &pkt) {
+                auto strong_self = weak_self.lock();
+                if (!strong_self) {
+                    return;
+                }
+
+                size_t i = 0;
+                pkt->for_each([&](const RtpPacket::Ptr &rtp) {
+                    // 只处理音频包
+                    if (rtp->type == TrackAudio) {
+                        // 【探针 F】: 确认WebRtcPlayer正在拉取Opus音频RTP包
+                        // InfoL << ">>>>>>>>>> 探针 F: WebRtcPlayer拉取到Opus RTP包, seq=" << rtp->getSeq() 
+                        //     << ", stamp=" << rtp->getStamp() << ", size=" << rtp->getPayloadSize();
+                        strong_self->onSendRtp(rtp, ++i == pkt->size());
+                    }
+                });
+            });
+            
+            _audio_reader->setDetachCB([weak_self]() {
+                auto strong_self = weak_self.lock();
+                if (!strong_self) {
+                    return;
+                }
+                // 不直接关闭，因为还有rtsp_reader
+                // InfoL << "Opus reader detached";
+            });
         } else {
-            // 从原始RTSP源的RingBuffer中读取数据
-            _reader = playSrc->getRing()->attach(getPoller(), true);
-            InfoL << ">>>>>>>>>>>>>>>>>>WebRtcPlayer: Using original RTSP source ring buffer for audio data";
+            // InfoL << ">>>>>>>>>>>>>>>>>>WebRtcPlayer: Using original RTSP source ring buffer for audio data";
         }
 
+        // 设置RTSP读取器的回调来处理视频数据（以及在没有Opus轨道时处理音频数据）
         weak_ptr<WebRtcPlayer> weak_self = static_pointer_cast<WebRtcPlayer>(shared_from_this());
         weak_ptr<Session> weak_session = static_pointer_cast<Session>(getSession());
-        _reader->setGetInfoCB([weak_session]() {
+        
+        rtsp_reader->setGetInfoCB([weak_session]() {
             Any ret;
             ret.set(static_pointer_cast<Session>(weak_session.lock()));
             return ret;
         });
-        _reader->setReadCB([weak_self](const RtspMediaSource::RingDataType &pkt) {
+        
+        rtsp_reader->setReadCB([weak_self, opus_track](const RtspMediaSource::RingDataType &pkt) {
             auto strong_self = weak_self.lock();
             if (!strong_self) {
                 return;
@@ -237,26 +278,35 @@ void WebRtcPlayer::onStartWebRTC() {
 
             size_t i = 0;
             pkt->for_each([&](const RtpPacket::Ptr &rtp) {
-                // 添加音频帧检测日志
-                if (rtp->type == TrackAudio) {
-                    InfoL << "WebRtcPlayer: Receiving audio RTP packet, seq=" << rtp->getSeq() 
-                        << ", stamp=" << rtp->getStamp() << ", size=" << rtp->getPayloadSize();
-                }
-                if (strong_self->_bfliter_flag) {
-                    if (TrackVideo == rtp->type && strong_self->_is_h264) {
-                        auto rtp_filter = strong_self->_bfilter->processPacket(rtp);
-                        if (rtp_filter) {
-                            strong_self->onSendRtp(rtp_filter, ++i == pkt->size());
+                // 如果是视频包，直接处理
+                if (rtp->type == TrackVideo) {
+                    // 添加视频帧检测日志
+                    // InfoL << ">>>>>>>>>>>>>>>>>>>>>>>WebRtcPlayer: Receiving video RTP packet, seq=" << rtp->getSeq() 
+                    //     << ", stamp=" << rtp->getStamp() << ", size=" << rtp->getPayloadSize();
+                    
+                    if (strong_self->_bfliter_flag) {
+                        if (strong_self->_is_h264) {
+                            auto rtp_filter = strong_self->_bfilter->processPacket(rtp);
+                            if (rtp_filter) {
+                                strong_self->onSendRtp(rtp_filter, ++i == pkt->size());
+                            }
+                        } else {
+                            strong_self->onSendRtp(rtp, ++i == pkt->size());
                         }
                     } else {
                         strong_self->onSendRtp(rtp, ++i == pkt->size());
                     }
-                } else {
+                } 
+                // 如果没有Opus轨道且是音频包，则处理音频包
+                else if (!opus_track && rtp->type == TrackAudio) {
+                    // InfoL << ">>>>>>>>>>>>>>>>>>>>WebRtcPlayer: Receiving audio RTP packet from RTSP source, seq=" << rtp->getSeq() 
+                    //     << ", stamp=" << rtp->getStamp() << ", size=" << rtp->getPayloadSize();
                     strong_self->onSendRtp(rtp, ++i == pkt->size());
                 }
             });
         });
-        _reader->setDetachCB([weak_self]() {
+        
+        rtsp_reader->setDetachCB([weak_self]() {
             auto strong_self = weak_self.lock();
             if (!strong_self) {
                 return;
@@ -264,22 +314,8 @@ void WebRtcPlayer::onStartWebRTC() {
             strong_self->onShutdown(SockException(Err_shutdown, "rtsp ring buffer detached"));
         });
 
-        _reader->setMessageCB([weak_self](const toolkit::Any &data) {
-            auto strong_self = weak_self.lock();
-            if (!strong_self) {
-                return;
-            }
-            if (data.is<Buffer>()) {
-                auto &buffer = data.get<Buffer>();
-                // PPID 51: 文本string  [AUTO-TRANSLATED:69a8cf81]
-                // PPID 51: Text string
-                // PPID 53: 二进制  [AUTO-TRANSLATED:faf00c3e]
-                // PPID 53: Binary
-                strong_self->sendDatachannel(0, 51, buffer.data(), buffer.size());
-            } else {
-                WarnL << "Send unknown message type to webrtc player: " << data.type_name();
-            }
-        });
+        // 存储读取器引用以防止它们被销毁
+        _reader = rtsp_reader;
     }
 }
 void WebRtcPlayer::onDestory() {
@@ -325,7 +361,7 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
             configure.audio.preferred_codec.clear();
             configure.audio.preferred_codec.emplace_back(CodecOpus);
             has_audio = true;
-            InfoL << ">>>>>>>>>>>>>>>>Using dedicated Opus track for WebRTC, codec=" << opus_track->getCodecName();
+            // InfoL << ">>>>>>>>>>>>>>>>Using dedicated Opus track for WebRTC, codec=" << opus_track->getCodecName();
         } 
     }
 
@@ -337,7 +373,7 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
                     configure.audio.preferred_codec.clear();
                     configure.audio.preferred_codec.emplace_back(CodecOpus);
                     has_audio = true;
-                    InfoL << ">>>>>>>>>>>>>>>>Using Opus track from source tracks";
+                    // InfoL << ">>>>>>>>>>>>>>>>Using Opus track from source tracks";
                     // 找到最优的Opus后，就不再关心其他音频轨道了
                     break; 
                 }
@@ -355,18 +391,18 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
             // 如果上面没有找到Opus，这里可以配置一个备用的音频编码
             has_audio = true;
             configure.audio.preferred_codec.emplace_back(track->getCodecId());
-            InfoL << ">>>>>>>>>>>>>>>>Using fallback audio codec: " << track->getCodecName();
+            // InfoL << ">>>>>>>>>>>>>>>>Using fallback audio codec: " << track->getCodecName();
         }
     }
 
     // 如果遍历后发现根本没有音频或视频轨道，则将其设置为 inactive
     if (!has_audio) {
         configure.audio.direction = RtpDirection::inactive;
-        InfoL << ">>>>>>>>>>>>>>>>No audio track found, setting audio to inactive";
+        // InfoL << ">>>>>>>>>>>>>>>>No audio track found, setting audio to inactive";
     }
     if (!has_video) {
         configure.video.direction = RtpDirection::inactive;
-        InfoL << ">>>>>>>>>>>>>>>>No video track found, setting video to inactive";
+        // InfoL << ">>>>>>>>>>>>>>>>No video track found, setting video to inactive";
     }
 
     // 【关键】不再调用 configure.setPlayRtspInfo()，因为它只会读取旧的静态SDP。

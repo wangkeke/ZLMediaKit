@@ -155,6 +155,9 @@ private:
     // Reader object for playing rtsp source
     RtspMediaSource::RingType::RingReader::Ptr _reader;
 
+    // 【新增】为Opus音频轨道创建一个专用的reader
+    RtspMediaSource::RingType::RingReader::Ptr _audio_reader;
+
     bool _is_h264 { false };
     bool _bfliter_flag { false };
     std::shared_ptr<H264BFrameFilter> _bfilter;

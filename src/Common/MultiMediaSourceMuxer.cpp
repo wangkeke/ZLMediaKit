@@ -648,11 +648,11 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
     }
 
     // 【探针 A.0】: 开始查找AAC轨道
-    InfoL << ">>>>>>>>>>>>>>>>>>>>>> 探针 A.0: 开始查找AAC轨道 ...";
+    // InfoL << ">>>>>>>>>>>>>>>>>>>>>> 探针 A.0: 开始查找AAC轨道 ...";
     // AAC到Opus转码功能
     auto audio_track = std::dynamic_pointer_cast<AudioTrack>(track);
     if (audio_track && audio_track->getCodecId() == CodecAAC) {
-        InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>> Found AAC audio track in Muxer for stream [" << shortUrl() << "]. Creating Opus transcoder...";
+        // InfoL << ">>>>>>>>>>>>>>>>>>>>>>>>> Found AAC audio track in Muxer for stream [" << shortUrl() << "]. Creating Opus transcoder...";
         
         // 只将新的Opus轨道添加到RtspMuxer
         if (_rtsp) {
@@ -663,9 +663,9 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
             // 存储Opus轨道引用，供WebRTC使用
             _opus_track = transcoded_track;
             
-            InfoL << ">>>>>>>>>>>>>>>>>>>>>>> Opus transcoded track created for WebRTC use in stream [" << shortUrl() << "].";
+            // InfoL << ">>>>>>>>>>>>>>>>>>>>>>> Opus transcoded track created for WebRTC use in stream [" << shortUrl() << "].";
         } else {
-            WarnL << ">>>>>>>>>>>>>>>>>>>>>>> RtspMuxer is not enabled, Opus track will not be added for stream [" << shortUrl() << "].";
+            // WarnL << ">>>>>>>>>>>>>>>>>>>>>>> RtspMuxer is not enabled, Opus track will not be added for stream [" << shortUrl() << "].";
         }
     }
 
