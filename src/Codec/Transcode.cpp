@@ -241,7 +241,7 @@ void TaskManager::onThreadRun(const string &name) {
             throw;
         }
     }
-    InfoL << name << " exited!";
+    // InfoL << name << " exited!";
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -439,7 +439,7 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
         if (track->getTrackType() == TrackVideo) {
             _context->width = static_pointer_cast<VideoTrack>(track)->getVideoWidth();
             _context->height = static_pointer_cast<VideoTrack>(track)->getVideoHeight();
-            InfoL << "media source :" << _context->width << " X " << _context->height;
+            // InfoL << "media source :" << _context->width << " X " << _context->height;
         }
 
         switch (track->getCodecId()) {
@@ -480,7 +480,7 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
                     if (_context->extradata) {
                         _context->extradata_size = extra_data->size();
                         memcpy(_context->extradata, extra_data->data(), extra_data->size());
-                        InfoL << "FFmpegDecoder: Applied AAC extradata, size=" << extra_data->size();
+                        // InfoL << "FFmpegDecoder: Applied AAC extradata, size=" << extra_data->size();
                     }
                 }
             }
@@ -504,7 +504,7 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
         if (ret >= 0) {
             // 成功  [AUTO-TRANSLATED:7d878ca9]
             // Success
-            InfoL << "打开解码器成功:" << codec->name;
+            // InfoL << "打开解码器成功:" << codec->name;
             break;
         }
 
@@ -1132,17 +1132,25 @@ bool Transcode::open(const Track::Ptr &src_track, CodecId dst_codec, int dst_sam
         ctx->channel_layout = av_get_default_channel_layout(target_channels);
 #endif
 
+        // 在 Transcode.cpp -> std::call_once 中
         AVDictionary *opts = nullptr;
-        av_dict_set(&opts, "application", "audio", 0);  // 改为voip应用，适合实时通信
-        av_dict_set(&opts, "vbr", "off", 0);
+        // 'voip' 模式专门为低延迟的实时语音优化
+        av_dict_set(&opts, "application", "voip", 0);
+
+        // 'constrained' VBR (约束可变比特率) 是质量和带宽效率的最佳平衡点
+        av_dict_set(&opts, "vbr", "constrained", 0);
+
+        // 设置一个合理的目标比特率
         av_dict_set(&opts, "bitrate", "64000", 0);
-        // 优化1: 控制 Opus 编码复杂度（0-10）将复杂度设置在 2 到 4 之间。4 是一个很好的平衡点。
-        av_dict_set(&opts, "comp", "4", 0);  // 提高编码复杂度以获得更好质量
-        av_dict_set(&opts, "frame_duration", "20", 0);  // 设置帧持续时间为20ms
-        // 添加更多Opus编码参数优化
-        av_dict_set(&opts, "packet_loss", "10", 0);  // 设置预期丢包率
-        av_dict_set(&opts, "vbr", "constrained", 0);  // 使用约束VBR模式
-        av_dict_set(&opts, "dtx", "1", 0);  // 启用不连续传输
+
+        // 【推荐】将复杂度设置在一个较低的、高效的水平
+        av_dict_set(&opts, "comp", "3", 0);
+
+        // 启用Opus内置的前向纠错(FEC)，能抵抗一定程度的网络丢包，增强健壮性
+        av_dict_set(&opts, "fec", "1", 0);
+
+        // 启用不连续传输(DTX)，在没有语音时发送极小的数据包，节省带宽
+        av_dict_set(&opts, "dtx", "1", 0);
         if (avcodec_open2(ctx, encoder, &opts) < 0) {
             av_dict_free(&opts);
             WarnL << "avcodec_open2 failed";
