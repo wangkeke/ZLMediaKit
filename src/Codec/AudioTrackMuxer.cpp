@@ -57,6 +57,8 @@ AudioTrackMuxer::AudioTrackMuxer(const AudioTrack::Ptr &origin_track) :
     rtp_ring->setDelegate(std::make_shared<RtpListDelegate>(_ring));
     _rtp_encoder->setRtpRing(rtp_ring);
     
+    // 确保总是获取同一个线程，保证任务顺序执行
+    _transcode_poller = toolkit::WorkThreadPool::Instance().getPoller();
     
     _transcode = std::make_shared<Transcode>();
     if (_transcode->open(origin_track, CodecOpus, 48000, getAudioChannel())) {
@@ -83,6 +85,24 @@ AudioTrackMuxer::AudioTrackMuxer(const AudioTrack::Ptr &origin_track) :
             } else if (!_rtp_encoder) {
                 WarnL << ">>>>>>>>>>>>>>>>>RTP encoder is null";
             }
+
+
+            // 【新增】当一个任务完成后，检查队列中是否还有下一个任务
+            Frame::Ptr next_frame;
+            {
+                std::lock_guard<std::mutex> lock(_queue_mutex);
+                if (!_frame_queue.empty()) {
+                    next_frame = _frame_queue.front();
+                    _frame_queue.pop_front();
+                }
+            }
+
+            if (next_frame) {
+                // 如果有，立即在同一个后台线程上开始处理下一个
+                _transcode->inputFrame(next_frame);
+            }
+
+
         });
     }else {
         WarnL << ">>>>>>>>>>>>>>>>>>>>>Failed to open AAC to Opus transcoder via Transcode class";
@@ -94,10 +114,34 @@ AudioTrackMuxer::AudioTrackMuxer(const AudioTrack::Ptr &origin_track) :
 bool AudioTrackMuxer::inputFrame(const Frame::Ptr &frame) {
 #ifdef ENABLE_FFMPEG
     if (_transcode) {
-        // 添加调试日志
-        // InfoL << ">>>>>>>>>> Sending AAC frame to transcoder, size: " << frame->size() 
-        //       << ", dts: " << frame->dts() << ", pts: " << frame->pts();
-        _transcode->inputFrame(frame);
+        
+        bool should_start_task = false;
+        {
+            std::lock_guard<std::mutex> lock(_queue_mutex);
+            // 只有当队列为空时，我们才需要启动一个新的异步任务
+            // 如果队列不为空，说明后台线程已经在忙了，我们只需把帧放进队列即可
+            should_start_task = _frame_queue.empty();
+            _frame_queue.push_back(Frame::getCacheAbleFrame(frame));
+        }
+        
+        if (should_start_task) {
+            auto strong_transcode = _transcode;
+            Frame::Ptr first_frame;
+            {
+                std::lock_guard<std::mutex> lock(_queue_mutex);
+                if (!_frame_queue.empty()) {
+                    first_frame = _frame_queue.front();
+                    _frame_queue.pop_front();
+                }
+            }
+
+            if (first_frame) {
+                _transcode_poller->async([strong_transcode, first_frame]() {
+                    strong_transcode->inputFrame(first_frame);
+                });
+            }
+        }
+        
     } else {
         // 这是一个重要的检查点
         WarnL << ">>>>>>>>>> 探针 B-ERROR: _transcode is nullptr in AudioTrackMuxer, cannot process frame!";

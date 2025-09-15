@@ -4,6 +4,8 @@
 #include "Extension/Track.h" // AudioTrackImp 定义在这里
 #include "Util/RingBuffer.h" // 包含RingBuffer
 #include "Rtsp/RtpCodec.h"   // 包含RtpPacket
+#include "Util/List.h"
+#include <mutex>       
 
 #ifdef ENABLE_FFMPEG
 // 【关键】使用前向声明，而不是包含完整的 "Transcode.h"
@@ -11,6 +13,8 @@
 namespace mediakit {
     class Transcode;
 }
+// 添加 WorkThreadPool 头文件包含
+#include "Thread/WorkThreadPool.h"
 #endif
 
 namespace mediakit {
@@ -20,7 +24,7 @@ namespace mediakit {
  * 它接收一个原始的AAC轨道，并通过FFmpeg将其转码为Opus。
  * 对外，它把自己伪装成一个原生的Opus轨道。
  */
-class AudioTrackMuxer : public AudioTrackImp {
+class AudioTrackMuxer : public AudioTrackImp, public std::enable_shared_from_this<AudioTrackMuxer> {
 public:
     using Ptr = std::shared_ptr<AudioTrackMuxer>;
     using RingBufferType = toolkit::RingBuffer<std::shared_ptr<toolkit::List<RtpPacket::Ptr>>>;
@@ -56,6 +60,12 @@ private:
     // 因为我们只声明了一个智能指针，并没有访问它的任何成员
     std::shared_ptr<Transcode> _transcode;
     RtpCodec::Ptr _rtp_encoder; // 用于将Opus Frame打包成RTP
+    // 添加转码线程池成员变量
+    toolkit::EventPoller::Ptr _transcode_poller;
+
+    // 一个线程安全的队列作为缓冲区
+    toolkit::List<Frame::Ptr> _frame_queue;
+    std::mutex _queue_mutex;
 #endif
 };
 
