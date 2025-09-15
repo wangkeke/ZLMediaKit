@@ -27,9 +27,7 @@ RUN apt-get update && \
          libssl-dev \
          gcc \
          g++ \
-         libgoogle-perftools-dev \
-         graphviz \
-         gdb \
+         libgoogle-perftools-dev graphviz gdb \
          libavcodec-dev \
          libavformat-dev \
          libavutil-dev \
@@ -54,7 +52,7 @@ RUN tar xfv libsrtp-2.3.0.tar.gz && \
 RUN mkdir -p build release/linux/${MODEL}/
 
 WORKDIR /opt/media/ZLMediaKit/build
-RUN cmake -DCMAKE_BUILD_TYPE=${MODEL} -DENABLE_WEBRTC=true -DENABLE_FFMPEG=true -DENABLE_TESTS=false -DENABLE_API=false -DENABLE_GPERFTOOLS=ON .. && \
+RUN cmake -DCMAKE_BUILD_TYPE=${MODEL} -DENABLE_WEBRTC=true -DENABLE_FFMPEG=true -DENABLE_TESTS=false -DENABLE_API=false .. && \
     make -j $(nproc)
 
 FROM ubuntu:20.04
@@ -79,7 +77,7 @@ RUN apt-get update && \
          libswresample3 \
          gcc \
          g++ \
-         libgoogle-perftools4 \
+         valgrind \
          gdb && \
          apt-get autoremove -y && \
          apt-get clean -y && \
@@ -95,5 +93,14 @@ COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer /opt/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/media/conf/
 COPY --from=build /opt/media/ZLMediaKit/www/ /opt/media/bin/www/
 ENV PATH /opt/media/bin:$PATH
-ENV HEAPPROFILE=/tmp/mediaserver.hprof
-CMD ["./MediaServer","-s", "default.pem", "-c", "../conf/config.ini", "-l","0"]
+
+# 【核心修改】: 使用 ENTRYPOINT 和 CMD 来启动 Valgrind
+# Valgrind 会将所有报告输出到容器内的 /tmp/valgrind-report.log 文件
+ENTRYPOINT ["valgrind", \
+            "--leak-check=full", \
+            "--show-leak-kinds=all", \
+            "--track-origins=yes", \
+            "--log-file=/tmp/valgrind-report.log", \
+            "./MediaServer"]
+
+CMD ["-s", "default.pem", "-c", "../conf/config.ini", "-l","0"]
