@@ -532,6 +532,40 @@ if(ENABLE_SERVER)
   add_subdirectory(server)
 endif()
 
+# ============================================================================
+# Integrate Google Performance Tools (gperftools/tcmalloc) for memory analysis
+# ============================================================================
+option(ENABLE_GPERFTOOLS "Enable gperftools for memory profiling" OFF)
+
+if(ENABLE_GPERFTOOLS)
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        # 使用 pkg-config 查找 libtcmalloc，这是最可靠的方式
+        pkg_check_modules(TCMALLOC QUIET IMPORTED_TARGET libtcmalloc)
+    endif()
+
+    if(TCMALLOC_FOUND)
+        message(STATUS "Found gperftools (tcmalloc) via pkg-config, enabling memory profiling.")
+        # 将 tcmalloc 库添加到所有目标的链接列表
+        # ZLMediaKit 使用 update_cached_list 宏来管理全局链接库
+        update_cached_list(MK_LINK_LIBRARIES PkgConfig::TCMALLOC)
+        # 添加编译定义，可以在代码中通过 #ifdef ENABLE_GPERFTOOLS 来控制
+        update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_GPERFTOOLS)
+    else()
+        # 如果 pkg-config 失败，尝试 CMake 自带的 find_library
+        find_library(TCMALLOC_LIB NAMES tcmalloc)
+        if(TCMALLOC_LIB)
+            message(STATUS "Found gperftools (tcmalloc) via find_library, enabling memory profiling.")
+            update_cached_list(MK_LINK_LIBRARIES ${TCMALLOC_LIB})
+            update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_GPERFTOOLS)
+        else()
+            message(WARNING "gperftools (tcmalloc) library not found. Memory profiling will be disabled.")
+            set(ENABLE_GPERFTOOLS OFF)
+        endif()
+    endif()
+endif()
+# ============================================================================
+
 # Android 会 add_subdirectory 并依赖该变量
 # Android will add_subdirectory and depend on this variable
 if(ENABLE_SERVER_LIB AND NOT CMAKE_PARENT_LIST_FILE STREQUAL CMAKE_CURRENT_LIST_FILE)
