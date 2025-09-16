@@ -4,6 +4,7 @@
 #include "Extension/Track.h" // AudioTrackImp 定义在这里
 #include "Util/RingBuffer.h" // 包含RingBuffer
 #include "Rtsp/RtpCodec.h"   // 包含RtpPacket
+#include <memory> // 确保包含了 memory 头文件
 
 #ifdef ENABLE_FFMPEG
 // 【关键】使用前向声明，而不是包含完整的 "Transcode.h"
@@ -20,7 +21,7 @@ namespace mediakit {
  * 它接收一个原始的AAC轨道，并通过FFmpeg将其转码为Opus。
  * 对外，它把自己伪装成一个原生的Opus轨道。
  */
-class AudioTrackMuxer : public AudioTrackImp {
+class AudioTrackMuxer : public AudioTrackImp, public std::enable_shared_from_this<AudioTrackMuxer> {
 public:
     using Ptr = std::shared_ptr<AudioTrackMuxer>;
     using RingBufferType = toolkit::RingBuffer<std::shared_ptr<toolkit::List<RtpPacket::Ptr>>>;
@@ -30,7 +31,10 @@ public:
      * @param origin_track 原始的AAC音频轨道
      */
     AudioTrackMuxer(const AudioTrack::Ptr &origin_track);
-    ~AudioTrackMuxer() override = default;
+    ~AudioTrackMuxer() override;
+
+    // 【新增】init() 方法声明
+    void init();
 
     /**
      * 输入帧。这个方法将被原始AAC轨道的addDelegate机制自动调用。
@@ -48,8 +52,11 @@ public:
     // 【关键】: 提供访问其内部RingBuffer的方法
     const RingBufferType::Ptr& getRing() const;
 
+    // 【新增】一个拷贝构造函数，专门用于 clone()
+    AudioTrackMuxer(const AudioTrackMuxer &that);
+
 private:
-    AudioTrack::Ptr _origin_track;
+    std::weak_ptr<AudioTrack> _origin_track_wptr; 
     RingBufferType::Ptr _ring; // 【关键】: 拥有自己的RingBuffer
 #ifdef ENABLE_FFMPEG
     // 编译器在这里只需要知道 Transcode 是一个类型就足够了，

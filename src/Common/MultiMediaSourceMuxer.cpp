@@ -658,6 +658,7 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
         if (_rtsp) {
             // 创建转码轨道装饰器
             auto transcoded_track = std::make_shared<AudioTrackMuxer>(audio_track);
+            transcoded_track->init();
             // 建立数据流委托，让原始AAC轨道的数据自动流向我们的转码器
             audio_track->addDelegate(transcoded_track);
             // 存储Opus轨道引用，供WebRTC使用

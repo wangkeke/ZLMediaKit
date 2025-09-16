@@ -26,69 +26,64 @@ private:
 
 AudioTrackMuxer::AudioTrackMuxer(const AudioTrack::Ptr &origin_track) :
     AudioTrackImp(CodecOpus, 48000, origin_track->getAudioChannel(), 16),
-    _origin_track(origin_track)
+    _origin_track_wptr(origin_track) {}
+
+
+AudioTrackMuxer::AudioTrackMuxer(const AudioTrackMuxer &that) :
+    AudioTrackImp(that),
+    _origin_track_wptr(that._origin_track_wptr),
+    _ring(that._ring)
 {
 #ifdef ENABLE_FFMPEG
-    // 创建并打开我们新的Transcode类
-    // InfoL << ">>>>>>>>>>>>>>>>>>>>>ENABLE_FFMPEG = true, AAC to Opus transcoder via Transcode class";
-    // 1. 创建RingBuffer
-    _ring = std::make_shared<RingBufferType>();
-    // 创建一个用于RTP编码器的中间RingBuffer
+    // 注意：我们不复制_transcode和_rtp_encoder，因为它们是重量级组件
+    // 每个克隆实例应该有自己的转码器实例，但可以共享_ring
+    _transcode = nullptr;
+    _rtp_encoder = nullptr;
+#endif
+}
+
+AudioTrackMuxer::~AudioTrackMuxer() {
+    // 可以在这里添加日志，确认析构函数被调用
+    InfoL << ">>>>>>>>>>>>>>>>>>>AudioTrackMuxer destroyed.";
+}
+
+void AudioTrackMuxer::init() {
+#ifdef ENABLE_FFMPEG
+    // 设置为0会禁用GOP缓存，使其作为一个普通的、有大小限制的环形缓冲区工作。
+    _ring = std::make_shared<RingBufferType>(1024, nullptr, 0);
     auto rtp_ring = std::make_shared<toolkit::RingBuffer<RtpPacket::Ptr>>();
-    
-    // 2. 创建Opus的RTP打包器
-    _rtp_encoder = Factory::getRtpEncoderByCodecId(CodecOpus, 111);  // 使用WebRTC标准的PT 111
-    if (!_rtp_encoder) {
-        WarnL << ">>>>>>>>>>>>>>>>>Failed to create Opus RTP encoder.";
-        return;
-    }
+    _rtp_encoder = Factory::getRtpEncoderByCodecId(CodecOpus, 111);
     
     // 设置RTP编码器的参数
     GET_CONFIG(uint32_t, audio_mtu, Rtp::kAudioMtuSize);
-    // 使用更可靠的SSRC生成方式，避免重复
     uint32_t ssrc = (uint32_t)(std::chrono::high_resolution_clock::now().time_since_epoch().count() & 0xFFFFFFFF);
-    // 确保SSRC不为0
-    if (ssrc == 0) {
-        ssrc = 0x12345678;
-    }
-    _rtp_encoder->setRtpInfo(ssrc, audio_mtu, 48000, 111);  // 确保使用PT 111
-    
-    // 3. 将RTP打包器的输出定向到中间RingBuffer，并通过代理将单个RTP包聚合成列表
+    if (ssrc == 0) ssrc = 0x12345678;
+    _rtp_encoder->setRtpInfo(ssrc, audio_mtu, 48000, 111);
+
     rtp_ring->setDelegate(std::make_shared<RtpListDelegate>(_ring));
     _rtp_encoder->setRtpRing(rtp_ring);
     
-    
     _transcode = std::make_shared<Transcode>();
-    if (_transcode->open(origin_track, CodecOpus, 48000, getAudioChannel())) {
-        // 将转码结果通过回调送入本轨道
-        _transcode->setOnFrame([this](const Frame::Ptr &opus_frame){
-            // 【探针 D】: 确认转码后的Opus帧已到达Muxer
-            if (opus_frame) {
-                // InfoL << ">>>>>>>>>> 探针 D: Muxer收到Opus帧, size=" << opus_frame->size()
-                //     << ", dts=" << opus_frame->dts() << ", pts=" << opus_frame->pts();
-            } else {
-                WarnL << ">>>>>>>>>> 探针 D-ERROR: Muxer收到了空的Opus帧!";
-                return;
-            }
-            
-            // 使用实际的转码帧
-            if (opus_frame && _rtp_encoder) {
-                // 添加调试日志
-                // InfoL << ">>>>>>>>>>>>>>>>>Sending Opus frame to RTP encoder, size: " << opus_frame->size() 
-                //       << ", dts: " << opus_frame->dts() << ", pts: " << opus_frame->pts();
-                // 这个inputFrame会将Opus Frame打包成RTP，并通过rtp_ring最终写入_ring
-                _rtp_encoder->inputFrame(opus_frame);
-            } else if (!opus_frame) {
-                WarnL << ">>>>>>>>>>>>>>>>>Received null Opus frame from transcoder";
-            } else if (!_rtp_encoder) {
-                WarnL << ">>>>>>>>>>>>>>>>>RTP encoder is null";
-            }
-        });
-    }else {
-        WarnL << ">>>>>>>>>>>>>>>>>>>>>Failed to open AAC to Opus transcoder via Transcode class";
-        _transcode = nullptr;
-    }
+    if (auto strong_origin = _origin_track_wptr.lock()) {
+        if (_transcode->open(strong_origin, CodecOpus, 48000, getAudioChannel())) {
+            // 【修正】: 在这里安全地使用 shared_from_this() 来创建 weak_ptr
+            std::weak_ptr<AudioTrackMuxer> weak_self = shared_from_this();
+            _transcode->setOnFrame([weak_self](const Frame::Ptr &opus_frame){
+                auto strong_self = weak_self.lock();
+                if (!strong_self) return;
+                
+                if (opus_frame && strong_self->_rtp_encoder) {
+                    strong_self->_rtp_encoder->inputFrame(opus_frame);
+                }
+            });
+        } else { _transcode = nullptr; }
+    } else { _transcode = nullptr; }
 #endif
+}
+
+Track::Ptr AudioTrackMuxer::clone() const {
+    // 使用轻量级克隆方式，避免创建重量级组件
+    return std::make_shared<AudioTrackMuxer>(*this);
 }
 
 bool AudioTrackMuxer::inputFrame(const Frame::Ptr &frame) {
@@ -104,16 +99,6 @@ bool AudioTrackMuxer::inputFrame(const Frame::Ptr &frame) {
     }
 #endif
     return true;
-}
-
-Track::Ptr AudioTrackMuxer::clone() const {
-    // 使用 std::dynamic_pointer_cast 进行安全的类型转换
-    auto cloned_origin = std::dynamic_pointer_cast<AudioTrack>(_origin_track->clone());
-    if (cloned_origin) {
-        return std::make_shared<AudioTrackMuxer>(cloned_origin);
-    }
-    // 如果克隆失败，返回nullptr
-    return nullptr;
 }
 
 // 提供访问其内部RingBuffer的方法
